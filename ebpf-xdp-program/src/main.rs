@@ -1,8 +1,12 @@
 use anyhow::Context as _;
-use aya::programs::{Xdp, XdpFlags};
+use aya::{
+    maps::PerCpuArray,
+    programs::{Xdp, XdpFlags},
+};
 use clap::Parser;
 #[rustfmt::skip]
 use log::{debug, warn};
+use std::time::Duration;
 use tokio::signal;
 
 #[derive(Debug, Parser)]
@@ -13,9 +17,9 @@ struct Opt {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let opt = Opt::parse();
+    tracing_subscriber::fmt::init();
 
-    env_logger::init();
+    let opt = Opt::parse();
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
     // new memcg based accounting, see https://lwn.net/Articles/837122/
@@ -59,10 +63,28 @@ async fn main() -> anyhow::Result<()> {
     program.attach(&iface, XdpFlags::default())
         .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
 
-    let ctrl_c = signal::ctrl_c();
-    println!("Waiting for Ctrl-C...");
-    ctrl_c.await?;
-    println!("Exiting...");
+    let pkt_cnt = PerCpuArray::try_from(ebpf.map("PKT_CNT").context("PKT_CNT map not found")?)?;
+
+    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                let key: u32 = 0;
+
+                let values = pkt_cnt
+                    .get(&key, 0)
+                    .context("failed to read PKT_CNT")?;
+
+                let total: u64 = values.iter().sum();
+                tracing::info!("packets: {}", total);
+            }
+            _ = signal::ctrl_c() => {
+                tracing::info!("Exiting...");
+                break;
+            }
+        }
+    }
 
     Ok(())
 }

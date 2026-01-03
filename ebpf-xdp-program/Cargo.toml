@@ -6,7 +6,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-ebpf-xdp-program-common = { path = "../ebpf-xdp-program-common", features = ["user"] }
+ebpf-xdp-program-common = { path = "../ebpf-xdp-program-common", features = [
+    "user",
+] }
 
 anyhow = { workspace = true, default-features = true }
 aya = { workspace = true }
@@ -22,6 +24,8 @@ tokio = { workspace = true, features = [
     "signal",
 ] }
 clap = { workspace = true, features = ["derive"] }
+tracing-subscriber = "0.3.22"
+tracing = "0.1.44"
 [build-dependencies]
 anyhow = { workspace = true }
 aya-build = { workspace = true }
