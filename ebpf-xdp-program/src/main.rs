@@ -1,11 +1,12 @@
 use anyhow::Context as _;
 use aya::{
-    maps::PerCpuArray,
+    maps::{MapData, PerCpuArray},
     programs::{Xdp, XdpFlags},
 };
 use clap::Parser;
 #[rustfmt::skip]
 use log::{debug, warn};
+use ebpf_xdp_program_common::{ProtoIndex, ProtoStats};
 use std::time::Duration;
 use tokio::signal;
 
@@ -13,6 +14,43 @@ use tokio::signal;
 struct Opt {
     #[clap(short, long, default_value = "wlo1")]
     iface: String,
+}
+
+#[derive(Default, Clone)]
+struct AccumulatedStats {
+    packets: u64,
+    bytes: u64,
+}
+
+#[derive(Clone, Default)]
+struct Snapshot {
+    stats: Vec<AccumulatedStats>,
+}
+
+fn read_current_stats(
+    proto_stats: &PerCpuArray<&MapData, ProtoStats>,
+) -> anyhow::Result<Vec<AccumulatedStats>> {
+    let mut stats = vec![AccumulatedStats::default(); ProtoIndex::COUNT as usize];
+
+    for idx in 0..ProtoIndex::COUNT {
+        let values = proto_stats.get(&idx, 0)?;
+        for v in values.iter() {
+            stats[idx as usize].packets += v.packets;
+            stats[idx as usize].bytes += v.bytes;
+        }
+    }
+
+    Ok(stats)
+}
+
+fn diff_stats(cur: &[AccumulatedStats], prev: &[AccumulatedStats]) -> Vec<AccumulatedStats> {
+    cur.iter()
+        .zip(prev.iter())
+        .map(|(c, p)| AccumulatedStats {
+            packets: c.packets.saturating_sub(p.packets),
+            bytes: c.bytes.saturating_sub(p.bytes),
+        })
+        .collect()
 }
 
 #[tokio::main]
@@ -63,21 +101,88 @@ async fn main() -> anyhow::Result<()> {
     program.attach(&iface, XdpFlags::default())
         .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
 
-    let pkt_cnt = PerCpuArray::try_from(ebpf.map("PKT_CNT").context("PKT_CNT map not found")?)?;
+    let proto_stats: PerCpuArray<_, ProtoStats> = PerCpuArray::try_from(
+        ebpf.map("PROTO_STATS")
+            .context("PROTO_STATS map not found")?,
+    )?;
 
-    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    let mut poll = tokio::time::interval(Duration::from_secs(1));
+    let mut report = tokio::time::interval(Duration::from_secs(5));
 
+    let mut last_report_snapshot = Snapshot {
+        stats: vec![AccumulatedStats::default(); ProtoIndex::COUNT as usize],
+    };
     loop {
         tokio::select! {
-            _ = ticker.tick() => {
-                let key: u32 = 0;
+            _ = poll.tick() => {
+                let current = read_current_stats(&proto_stats)?;
+                for (idx, s) in current.iter().enumerate() {
+                    let proto = unsafe { core::mem::transmute::<u32, ProtoIndex>(idx as u32) };
 
-                let values = pkt_cnt
-                    .get(&key, 0)
-                    .context("failed to read PKT_CNT")?;
+                    tracing::info!(
+                        "proto {} -> packets={}, bytes={}",
+                        proto.label(),
+                        s.packets,
+                        s.bytes
+                    );
+                }
+            }
+            _ = report.tick() => {
+                let current = read_current_stats(&proto_stats)?;
 
-                let total: u64 = values.iter().sum();
-                tracing::info!("packets: {}", total);
+                let delta = diff_stats(&current, &last_report_snapshot.stats);
+                last_report_snapshot.stats = current.clone();
+
+                let total_packets: u64 = delta.iter().map(|s| s.packets).sum();
+                let total_bytes: u64 = delta.iter().map(|s| s.bytes).sum();
+
+                if total_packets == 0 || total_bytes == 0 {
+                    tracing::info!("no traffic observed in this interval");
+                    continue;
+                }
+
+                // --- 1) TCP vs UDP (packet ratio) ---
+                let tcp_packets = delta[ProtoIndex::Tcp as usize].packets;
+                let udp_packets = delta[ProtoIndex::Udp as usize].packets;
+
+                let tcp_pct = tcp_packets as f64 * 100.0 / total_packets as f64;
+                let udp_pct = udp_packets as f64 * 100.0 / total_packets as f64;
+
+                tracing::info!(
+                    "traffic mix (packets): TCP={:.1}%, UDP={:.1}%",
+                    tcp_pct,
+                    udp_pct
+                );
+
+
+                // --- 2) IPv6 vs IPv4 (byte ratio) ---
+                let ipv6_bytes = delta[ProtoIndex::Ipv6 as usize].bytes;
+                let ipv6_pct = ipv6_bytes as f64 * 100.0 / total_bytes as f64;
+
+                tracing::info!(
+                    "traffic mix (bytes): IPv6={:.1}%, IPv4={:.1}%",
+                    ipv6_pct,
+                    100.0 - ipv6_pct
+                );
+
+                // --- 3) Control-plane vs Data-plane (byte ratio) ---
+                // Control-plane: ICMP
+                // Data-plane: TCP + UDP
+                let control_plane_bytes =
+                    delta[ProtoIndex::Icmp as usize].bytes;
+
+                let data_plane_bytes =
+                    delta[ProtoIndex::Tcp as usize].bytes +
+                    delta[ProtoIndex::Udp as usize].bytes;
+
+                let control_pct = control_plane_bytes as f64 * 100.0 / total_bytes as f64;
+                let data_pct = data_plane_bytes as f64 * 100.0 / total_bytes as f64;
+
+                tracing::info!(
+                    "traffic role (bytes): control-plane={:.1}%, data-plane={:.1}%",
+                    control_pct,
+                    data_pct
+                );
             }
             _ = signal::ctrl_c() => {
                 tracing::info!("Exiting...");
