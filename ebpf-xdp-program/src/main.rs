@@ -1,11 +1,17 @@
+mod stats;
+
 use anyhow::Context as _;
 use aya::{
-    maps::{MapData, PerCpuArray},
+    maps::PerCpuArray,
     programs::{Xdp, XdpFlags},
 };
 use clap::Parser;
 #[rustfmt::skip]
 use log::{debug, warn};
+use crate::stats::{
+    compute::{compute_rates, diff_stats, read_snapshot},
+    model::ProtoSnapshot,
+};
 use ebpf_xdp_program_common::{ProtoIndex, ProtoStats};
 use std::time::Duration;
 use tokio::signal;
@@ -14,43 +20,6 @@ use tokio::signal;
 struct Opt {
     #[clap(short, long, default_value = "wlo1")]
     iface: String,
-}
-
-#[derive(Default, Clone)]
-struct AccumulatedStats {
-    packets: u64,
-    bytes: u64,
-}
-
-#[derive(Clone, Default)]
-struct Snapshot {
-    stats: Vec<AccumulatedStats>,
-}
-
-fn read_current_stats(
-    proto_stats: &PerCpuArray<&MapData, ProtoStats>,
-) -> anyhow::Result<Vec<AccumulatedStats>> {
-    let mut stats = vec![AccumulatedStats::default(); ProtoIndex::COUNT as usize];
-
-    for idx in 0..ProtoIndex::COUNT {
-        let values = proto_stats.get(&idx, 0)?;
-        for v in values.iter() {
-            stats[idx as usize].packets += v.packets;
-            stats[idx as usize].bytes += v.bytes;
-        }
-    }
-
-    Ok(stats)
-}
-
-fn diff_stats(cur: &[AccumulatedStats], prev: &[AccumulatedStats]) -> Vec<AccumulatedStats> {
-    cur.iter()
-        .zip(prev.iter())
-        .map(|(c, p)| AccumulatedStats {
-            packets: c.packets.saturating_sub(p.packets),
-            bytes: c.bytes.saturating_sub(p.bytes),
-        })
-        .collect()
 }
 
 #[tokio::main]
@@ -106,17 +75,20 @@ async fn main() -> anyhow::Result<()> {
             .context("PROTO_STATS map not found")?,
     )?;
 
-    let mut poll = tokio::time::interval(Duration::from_secs(1));
-    let mut report = tokio::time::interval(Duration::from_secs(5));
+    let mut poll_1s = tokio::time::interval(Duration::from_secs(1));
+    let mut report_5s = tokio::time::interval(Duration::from_secs(5));
+    let mut rate_60s = tokio::time::interval(Duration::from_secs(60));
 
-    let mut last_report_snapshot = Snapshot {
-        stats: vec![AccumulatedStats::default(); ProtoIndex::COUNT as usize],
-    };
+    let mut last_mix_snapshot: Option<ProtoSnapshot> = None;
+    let mut last_rate_snapshot: Option<ProtoSnapshot> = None;
+    let mut latest_snapshot: Option<ProtoSnapshot> = None;
     loop {
         tokio::select! {
-            _ = poll.tick() => {
-                let current = read_current_stats(&proto_stats)?;
-                for (idx, s) in current.iter().enumerate() {
+            _ = poll_1s.tick() => {
+                let curr = read_snapshot(&proto_stats)?;
+                latest_snapshot = Some(curr.clone());
+
+                for (idx, s) in curr.stats.iter().enumerate() {
                     let proto = unsafe { core::mem::transmute::<u32, ProtoIndex>(idx as u32) };
 
                     tracing::info!(
@@ -127,62 +99,55 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
             }
-            _ = report.tick() => {
-                let current = read_current_stats(&proto_stats)?;
+            _ = report_5s.tick() => {
+                let Some(curr) = &latest_snapshot else { continue };
 
-                let delta = diff_stats(&current, &last_report_snapshot.stats);
-                last_report_snapshot.stats = current.clone();
+                if let Some(prev) = &last_mix_snapshot {
+                    let delta = diff_stats(&curr.stats, &prev.stats);
 
-                let total_packets: u64 = delta.iter().map(|s| s.packets).sum();
-                let total_bytes: u64 = delta.iter().map(|s| s.bytes).sum();
+                    let total_packets: u64 = delta.iter().map(|s| s.packets).sum();
+                    let total_bytes: u64 = delta.iter().map(|s| s.bytes).sum();
 
-                if total_packets == 0 || total_bytes == 0 {
-                    tracing::info!("no traffic observed in this interval");
-                    continue;
+                    if total_packets > 0 {
+                        let tcp = delta[ProtoIndex::Tcp as usize].packets;
+                        let udp = delta[ProtoIndex::Udp as usize].packets;
+
+                        tracing::info!(
+                            "mix(5s packets): TCP={:.1}%, UDP={:.1}%",
+                            tcp as f64 * 100.0 / total_packets as f64,
+                            udp as f64 * 100.0 / total_packets as f64,
+                        );
+                    }
+
+                    if total_bytes > 0 {
+                        let ipv6 = delta[ProtoIndex::Ipv6 as usize].bytes;
+                        tracing::info!(
+                            "mix(5s bytes): IPv6={:.1}%, IPv4={:.1}%",
+                            ipv6 as f64 * 100.0 / total_bytes as f64,
+                            100.0 - ipv6 as f64 * 100.0 / total_bytes as f64,
+                        );
+                    }
                 }
 
-                // --- 1) TCP vs UDP (packet ratio) ---
-                let tcp_packets = delta[ProtoIndex::Tcp as usize].packets;
-                let udp_packets = delta[ProtoIndex::Udp as usize].packets;
+                last_mix_snapshot = Some(curr.clone());
+            }
+            _ = rate_60s.tick() => {
+                let Some(curr) = &latest_snapshot else { continue };
 
-                let tcp_pct = tcp_packets as f64 * 100.0 / total_packets as f64;
-                let udp_pct = udp_packets as f64 * 100.0 / total_packets as f64;
+                if let Some(prev) = &last_rate_snapshot {
+                    let rates = compute_rates(prev, curr);
 
-                tracing::info!(
-                    "traffic mix (packets): TCP={:.1}%, UDP={:.1}%",
-                    tcp_pct,
-                    udp_pct
-                );
+                    for r in &rates {
+                        tracing::info!(
+                            "rate(window=60s) proto={:?} pps={:.1} bps={:.1}",
+                            r.proto,
+                            r.pps,
+                            r.bps
+                        );
+                    }
+                }
 
-
-                // --- 2) IPv6 vs IPv4 (byte ratio) ---
-                let ipv6_bytes = delta[ProtoIndex::Ipv6 as usize].bytes;
-                let ipv6_pct = ipv6_bytes as f64 * 100.0 / total_bytes as f64;
-
-                tracing::info!(
-                    "traffic mix (bytes): IPv6={:.1}%, IPv4={:.1}%",
-                    ipv6_pct,
-                    100.0 - ipv6_pct
-                );
-
-                // --- 3) Control-plane vs Data-plane (byte ratio) ---
-                // Control-plane: ICMP
-                // Data-plane: TCP + UDP
-                let control_plane_bytes =
-                    delta[ProtoIndex::Icmp as usize].bytes;
-
-                let data_plane_bytes =
-                    delta[ProtoIndex::Tcp as usize].bytes +
-                    delta[ProtoIndex::Udp as usize].bytes;
-
-                let control_pct = control_plane_bytes as f64 * 100.0 / total_bytes as f64;
-                let data_pct = data_plane_bytes as f64 * 100.0 / total_bytes as f64;
-
-                tracing::info!(
-                    "traffic role (bytes): control-plane={:.1}%, data-plane={:.1}%",
-                    control_pct,
-                    data_pct
-                );
+                last_rate_snapshot = Some(curr.clone());
             }
             _ = signal::ctrl_c() => {
                 tracing::info!("Exiting...");
