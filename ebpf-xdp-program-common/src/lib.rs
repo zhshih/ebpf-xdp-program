@@ -12,7 +12,7 @@ pub struct ProtoStats {
 unsafe impl aya::Pod for ProtoStats {}
 
 #[repr(u32)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ProtoIndex {
     Icmp = 0,
     Tcp = 1,

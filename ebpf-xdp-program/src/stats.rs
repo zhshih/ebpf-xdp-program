@@ -1,2 +1,3 @@
-pub mod compute;
-pub mod model;
+pub mod anomaly;
+pub mod baseline;
+pub mod rate;

@@ -9,8 +9,11 @@ use clap::Parser;
 #[rustfmt::skip]
 use log::{debug, warn};
 use crate::stats::{
-    compute::{compute_rates, diff_stats, read_snapshot},
-    model::ProtoSnapshot,
+    baseline::proto::{ProtoBaseline, ProtoEwmaBaseline},
+    rate::{
+        compute::{compute_rates, diff_stats, read_snapshot},
+        model::ProtoSnapshot,
+    },
 };
 use ebpf_xdp_program_common::{ProtoIndex, ProtoStats};
 use std::time::Duration;
@@ -82,6 +85,8 @@ async fn main() -> anyhow::Result<()> {
     let mut last_mix_snapshot: Option<ProtoSnapshot> = None;
     let mut last_rate_snapshot: Option<ProtoSnapshot> = None;
     let mut latest_snapshot: Option<ProtoSnapshot> = None;
+
+    let mut ewma = ProtoEwmaBaseline::new(0.2);
     loop {
         tokio::select! {
             _ = poll_1s.tick() => {
@@ -91,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
                 for (idx, s) in curr.stats.iter().enumerate() {
                     let proto = unsafe { core::mem::transmute::<u32, ProtoIndex>(idx as u32) };
 
-                    tracing::info!(
+                    tracing::debug!(
                         "proto {} -> packets={}, bytes={}",
                         proto.label(),
                         s.packets,
@@ -137,13 +142,27 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(prev) = &last_rate_snapshot {
                     let rates = compute_rates(prev, curr);
 
+                    ewma.update(&rates);
+
                     for r in &rates {
-                        tracing::info!(
-                            "rate(window=60s) proto={:?} pps={:.1} bps={:.1}",
-                            r.proto,
-                            r.pps,
-                            r.bps
-                        );
+                        if let Some(ProtoBaseline { pps, bps }) = ewma.baseline(r.proto) {
+                            let (z_pps, z_bps) = ewma.z_scores(r.proto, r.pps, r.bps).unwrap_or((None, None));
+
+                            tracing::info!(
+                                "rate(60s) proto={:?} \
+                                pps={:.1} (ewma={:.1}, σ={:.1}, z-score={}) \
+                                bps={:.1} (ewma={:.1}, σ={:.1}, z-score={})",
+                                r.proto,
+                                r.pps,
+                                pps.mean,
+                                pps.stddev,
+                                z_pps.map_or_else(|| "N/A".to_string(), |z| format!("{:.1}", z)),
+                                r.bps,
+                                bps.mean,
+                                bps.stddev,
+                                z_bps.map_or_else(|| "N/A".to_string(), |z| format!("{:.1}", z)),
+                            );
+                        }
                     }
                 }
 
