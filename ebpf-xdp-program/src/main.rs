@@ -9,10 +9,11 @@ use clap::Parser;
 #[rustfmt::skip]
 use log::{debug, warn};
 use crate::stats::{
-    baseline::proto::{ProtoBaseline, ProtoEwmaBaseline},
+    analyze::analyze_snapshot,
+    baseline::proto::ProtoEwmaBaseline,
     rate::{
         compute::{compute_rates, diff_stats, read_snapshot},
-        model::ProtoSnapshot,
+        model::{ProtoRateSnapshot, ProtoSnapshot},
     },
 };
 use ebpf_xdp_program_common::{ProtoIndex, ProtoStats};
@@ -86,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
     let mut last_rate_snapshot: Option<ProtoSnapshot> = None;
     let mut latest_snapshot: Option<ProtoSnapshot> = None;
 
-    let mut ewma = ProtoEwmaBaseline::new(0.2);
+    let mut ewma_baseline = ProtoEwmaBaseline::new(0.2);
     loop {
         tokio::select! {
             _ = poll_1s.tick() => {
@@ -142,27 +143,15 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(prev) = &last_rate_snapshot {
                     let rates = compute_rates(prev, curr);
 
-                    ewma.update(&rates);
+                    let snapshot = ProtoRateSnapshot {
+                        timestamp: curr.timestamp,
+                        rates,
+                    };
 
-                    for r in &rates {
-                        if let Some(ProtoBaseline { pps, bps }) = ewma.baseline(r.proto) {
-                            let (z_pps, z_bps) = ewma.z_scores(r.proto, r.pps, r.bps).unwrap_or((None, None));
+                    let decisions = analyze_snapshot(&snapshot, &mut ewma_baseline);
 
-                            tracing::info!(
-                                "rate(60s) proto={:?} \
-                                pps={:.1} (ewma={:.1}, σ={:.1}, z-score={}) \
-                                bps={:.1} (ewma={:.1}, σ={:.1}, z-score={})",
-                                r.proto,
-                                r.pps,
-                                pps.mean,
-                                pps.stddev,
-                                z_pps.map_or_else(|| "N/A".to_string(), |z| format!("{:.1}", z)),
-                                r.bps,
-                                bps.mean,
-                                bps.stddev,
-                                z_bps.map_or_else(|| "N/A".to_string(), |z| format!("{:.1}", z)),
-                            );
-                        }
+                    for d in decisions {
+                        tracing::info!("{:?}", d);
                     }
                 }
 

@@ -3,6 +3,7 @@ use super::ewma::Ewma;
 use ebpf_xdp_program_common::ProtoIndex;
 use std::collections::HashMap;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Baseline {
     pub mean: f64,
