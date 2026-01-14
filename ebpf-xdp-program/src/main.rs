@@ -13,7 +13,7 @@ use crate::stats::{
     baseline::proto::ProtoEwmaBaseline,
     rate::{
         compute::{compute_rates, diff_stats, read_snapshot},
-        model::{ProtoRateSnapshot, ProtoSnapshot},
+        model::{ProtoRate, ProtoRateSnapshot, ProtoSnapshot},
     },
 };
 use ebpf_xdp_program_common::{ProtoIndex, ProtoStats};
@@ -95,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
                 latest_snapshot = Some(curr.clone());
 
                 for (idx, s) in curr.stats.iter().enumerate() {
-                    let proto = unsafe { core::mem::transmute::<u32, ProtoIndex>(idx as u32) };
+                    let Some(proto) = ProtoIndex::from_index(idx) else { continue };
 
                     tracing::debug!(
                         "proto {} -> packets={}, bytes={}",
@@ -107,32 +107,53 @@ async fn main() -> anyhow::Result<()> {
             }
             _ = report_5s.tick() => {
                 let Some(curr) = &latest_snapshot else { continue };
+                let Some(prev) = &last_mix_snapshot else {
+                    last_mix_snapshot = Some(curr.clone());
+                    continue;
+                };
 
-                if let Some(prev) = &last_mix_snapshot {
-                    let delta = diff_stats(&curr.stats, &prev.stats);
+                let delta = diff_stats(&curr.stats, &prev.stats);
+                let interval_secs = 5.0;
 
-                    let total_packets: u64 = delta.iter().map(|s| s.packets).sum();
-                    let total_bytes: u64 = delta.iter().map(|s| s.bytes).sum();
+                let rate_snapshot = ProtoRateSnapshot {
+                    timestamp: curr.timestamp,
+                    rates: delta
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(idx, d)| -> Option<ProtoRate> {
+                            let proto = ProtoIndex::from_index(idx)?;
+                            Some(ProtoRate {
+                                proto,
+                                pps: d.packets as f64 / interval_secs,
+                                bps: d.bytes as f64 * 8.0 / interval_secs,
+                            })
+                        })
+                        .collect(),
+                };
 
-                    if total_packets > 0 {
-                        let tcp = delta[ProtoIndex::Tcp as usize].packets;
-                        let udp = delta[ProtoIndex::Udp as usize].packets;
+                ewma_baseline.update(&rate_snapshot.rates);
 
-                        tracing::info!(
-                            "mix(5s packets): TCP={:.1}%, UDP={:.1}%",
-                            tcp as f64 * 100.0 / total_packets as f64,
-                            udp as f64 * 100.0 / total_packets as f64,
-                        );
-                    }
+                let total_packets: u64 = delta.iter().map(|s| s.packets).sum();
+                let total_bytes: u64 = delta.iter().map(|s| s.bytes).sum();
 
-                    if total_bytes > 0 {
-                        let ipv6 = delta[ProtoIndex::Ipv6 as usize].bytes;
-                        tracing::info!(
-                            "mix(5s bytes): IPv6={:.1}%, IPv4={:.1}%",
-                            ipv6 as f64 * 100.0 / total_bytes as f64,
-                            100.0 - ipv6 as f64 * 100.0 / total_bytes as f64,
-                        );
-                    }
+                if total_packets > 0 {
+                    let tcp = delta[ProtoIndex::Tcp as usize].packets;
+                    let udp = delta[ProtoIndex::Udp as usize].packets;
+
+                    tracing::info!(
+                        "mix(5s packets): TCP={:.1}%, UDP={:.1}%",
+                        tcp as f64 * 100.0 / total_packets as f64,
+                        udp as f64 * 100.0 / total_packets as f64,
+                    );
+                }
+
+                if total_bytes > 0 {
+                    let ipv6 = delta[ProtoIndex::Ipv6 as usize].bytes;
+                    tracing::info!(
+                        "mix(5s bytes): IPv6={:.1}%, IPv4={:.1}%",
+                        ipv6 as f64 * 100.0 / total_bytes as f64,
+                        100.0 - ipv6 as f64 * 100.0 / total_bytes as f64,
+                    );
                 }
 
                 last_mix_snapshot = Some(curr.clone());
@@ -148,9 +169,13 @@ async fn main() -> anyhow::Result<()> {
                         rates,
                     };
 
-                    let decisions = analyze_snapshot(&snapshot, &mut ewma_baseline);
+                    let result = analyze_snapshot(&snapshot, &mut ewma_baseline);
 
-                    for d in decisions {
+                    if result.is_warming_up() {
+                        tracing::info!("baseline warming up");
+                    }
+
+                    for d in result.decisions() {
                         tracing::info!("{:?}", d);
                     }
                 }

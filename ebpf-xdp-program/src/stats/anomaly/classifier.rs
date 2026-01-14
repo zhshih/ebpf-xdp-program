@@ -7,6 +7,24 @@ pub enum AnomalyLevel {
     Severe,
 }
 
+pub enum AnalyzeResult {
+    WarmingUp,
+    Normal(Vec<AnomalyDecision>),
+}
+
+impl AnalyzeResult {
+    pub fn decisions(&self) -> &[AnomalyDecision] {
+        match self {
+            AnalyzeResult::Normal(d) => d,
+            AnalyzeResult::WarmingUp => &[],
+        }
+    }
+
+    pub fn is_warming_up(&self) -> bool {
+        matches!(self, AnalyzeResult::WarmingUp)
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct AnomalyDecision {

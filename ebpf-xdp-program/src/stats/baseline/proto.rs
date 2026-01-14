@@ -1,4 +1,4 @@
-use super::super::{anomaly::zscore, rate::model::ProtoRate};
+use super::super::rate::model::ProtoRate;
 use super::ewma::Ewma;
 use ebpf_xdp_program_common::ProtoIndex;
 use std::collections::HashMap;
@@ -47,6 +47,11 @@ impl ProtoEwmaBaseline {
         }
     }
 
+    pub fn is_ready(&self) -> bool {
+        self.pps.values().all(|ewma| ewma.is_ready())
+            && self.bps.values().all(|ewma| ewma.is_ready())
+    }
+
     pub fn baseline(&self, proto: ProtoIndex) -> Option<ProtoBaseline> {
         let pps = self.pps.get(&proto)?;
         let bps = self.bps.get(&proto)?;
@@ -72,8 +77,8 @@ impl ProtoEwmaBaseline {
         let pps_ewma = self.pps.get(&proto)?;
         let bps_ewma = self.bps.get(&proto)?;
 
-        let z_pps = zscore::z_score(pps, pps_ewma.mean()?, pps_ewma.stddev()?);
-        let z_bps = zscore::z_score(bps, bps_ewma.mean()?, bps_ewma.stddev()?);
+        let z_pps = pps_ewma.robust_z_score(pps);
+        let z_bps = bps_ewma.robust_z_score(bps);
 
         Some((z_pps, z_bps))
     }

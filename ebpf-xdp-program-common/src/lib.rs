@@ -21,6 +21,21 @@ pub enum ProtoIndex {
     Other = 4,
 }
 
+impl TryFrom<usize> for ProtoIndex {
+    type Error = ();
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Icmp),
+            1 => Ok(Self::Tcp),
+            2 => Ok(Self::Udp),
+            3 => Ok(Self::Ipv6),
+            4 => Ok(Self::Other),
+            _ => Err(()),
+        }
+    }
+}
+
 impl ProtoIndex {
     pub const COUNT: u32 = 5;
 
@@ -32,5 +47,9 @@ impl ProtoIndex {
             ProtoIndex::Ipv6 => "IPv6",
             ProtoIndex::Other => "OTHER",
         }
+    }
+
+    pub fn from_index(idx: usize) -> Option<Self> {
+        Self::try_from(idx).ok()
     }
 }

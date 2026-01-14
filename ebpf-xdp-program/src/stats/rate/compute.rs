@@ -31,17 +31,14 @@ pub fn compute_rates(prev: &ProtoSnapshot, curr: &ProtoSnapshot) -> Vec<ProtoRat
         .iter()
         .zip(prev.stats.iter())
         .enumerate()
-        .map(|(idx, (curr, prev))| {
-            let pkt_delta = curr.packets.saturating_sub(prev.packets);
-            let byte_delta = curr.bytes.saturating_sub(prev.bytes);
+        .filter_map(|(idx, (curr, prev))| {
+            let proto = ProtoIndex::from_index(idx)?;
 
-            ProtoRate {
-                proto: unsafe {
-                    core::mem::transmute::<u32, ebpf_xdp_program_common::ProtoIndex>(idx as u32)
-                },
-                pps: pkt_delta as f64 / dt,
-                bps: byte_delta as f64 / dt,
-            }
+            Some(ProtoRate {
+                proto,
+                pps: curr.packets.saturating_sub(prev.packets) as f64 / dt,
+                bps: curr.bytes.saturating_sub(prev.bytes) as f64 / dt,
+            })
         })
         .collect()
 }

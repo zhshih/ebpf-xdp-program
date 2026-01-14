@@ -1,5 +1,5 @@
 use crate::stats::{
-    anomaly::classifier::{AnomalyDecision, AnomalyLevel, classify},
+    anomaly::classifier::{AnalyzeResult, AnomalyDecision, AnomalyLevel, classify},
     baseline::proto::ProtoEwmaBaseline,
     rate::model::ProtoRateSnapshot,
 };
@@ -7,7 +7,7 @@ use crate::stats::{
 pub fn analyze_snapshot(
     snapshot: &ProtoRateSnapshot,
     baseline: &mut ProtoEwmaBaseline,
-) -> Vec<AnomalyDecision> {
+) -> AnalyzeResult {
     let mut decisions = Vec::new();
 
     for rate in &snapshot.rates {
@@ -31,12 +31,17 @@ pub fn analyze_snapshot(
             _ => AnomalyLevel::Normal,
         };
 
+        let base = match baseline.baseline(rate.proto) {
+            Some(b) => b,
+            None => continue,
+        };
+
         let decision = AnomalyDecision {
             proto: rate.proto,
             pps: rate.pps,
             bps: rate.bps,
-            pps_baseline: baseline.baseline(rate.proto).unwrap().pps,
-            bps_baseline: baseline.baseline(rate.proto).unwrap().bps,
+            pps_baseline: base.pps,
+            bps_baseline: base.bps,
             z_pps,
             z_bps,
             anomaly_level,
@@ -45,7 +50,9 @@ pub fn analyze_snapshot(
         decisions.push(decision);
     }
 
-    baseline.update(&snapshot.rates);
-
-    decisions
+    if !baseline.is_ready() {
+        AnalyzeResult::WarmingUp
+    } else {
+        AnalyzeResult::Normal(decisions)
+    }
 }
