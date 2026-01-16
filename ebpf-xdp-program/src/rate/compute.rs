@@ -3,28 +3,31 @@ use std::time::Instant;
 
 use ebpf_xdp_program_common::{ProtoIndex, ProtoStats};
 
-use super::model::{AccumulatedStats, ProtoRate, ProtoSnapshot};
+use super::model::{ProtoRate, TrafficCounters, TrafficCountersSnapshot};
 
 pub fn read_snapshot(
     proto_stats: &PerCpuArray<&MapData, ProtoStats>,
-) -> anyhow::Result<ProtoSnapshot> {
-    Ok(ProtoSnapshot {
+) -> anyhow::Result<TrafficCountersSnapshot> {
+    Ok(TrafficCountersSnapshot {
         timestamp: Instant::now(),
         stats: read_current_stats(proto_stats)?,
     })
 }
 
-pub fn diff_stats(cur: &[AccumulatedStats], prev: &[AccumulatedStats]) -> Vec<AccumulatedStats> {
+pub fn diff_stats(cur: &[TrafficCounters], prev: &[TrafficCounters]) -> Vec<TrafficCounters> {
     cur.iter()
         .zip(prev.iter())
-        .map(|(c, p)| AccumulatedStats {
+        .map(|(c, p)| TrafficCounters {
             packets: c.packets.saturating_sub(p.packets),
             bytes: c.bytes.saturating_sub(p.bytes),
         })
         .collect()
 }
 
-pub fn compute_rates(prev: &ProtoSnapshot, curr: &ProtoSnapshot) -> Vec<ProtoRate> {
+pub fn compute_rates(
+    prev: &TrafficCountersSnapshot,
+    curr: &TrafficCountersSnapshot,
+) -> Vec<ProtoRate> {
     let dt = curr.timestamp.duration_since(prev.timestamp).as_secs_f64();
 
     curr.stats
@@ -45,8 +48,8 @@ pub fn compute_rates(prev: &ProtoSnapshot, curr: &ProtoSnapshot) -> Vec<ProtoRat
 
 fn read_current_stats(
     proto_stats: &PerCpuArray<&MapData, ProtoStats>,
-) -> anyhow::Result<Vec<AccumulatedStats>> {
-    let mut stats = vec![AccumulatedStats::default(); ProtoIndex::COUNT as usize];
+) -> anyhow::Result<Vec<TrafficCounters>> {
+    let mut stats = vec![TrafficCounters::default(); ProtoIndex::COUNT as usize];
 
     for idx in 0..ProtoIndex::COUNT {
         let values = proto_stats.get(&idx, 0)?;

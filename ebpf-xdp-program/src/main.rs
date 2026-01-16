@@ -1,4 +1,8 @@
-mod stats;
+mod alert;
+mod anomaly;
+mod baseline;
+mod pipeline;
+mod rate;
 
 use anyhow::Context as _;
 use aya::{
@@ -8,19 +12,23 @@ use aya::{
 use clap::Parser;
 #[rustfmt::skip]
 use log::{debug, warn};
-use crate::stats::{
-    alert::semantics::{decision_to_alert, emit_alert},
-    analyze::analyze_snapshot,
-    anomaly::classifier::AnalyzeResult,
-    baseline::proto::ProtoEwmaBaseline,
+use crate::{
+    alert::{decision_to_alert, emit_alert},
+    anomaly::AnalyzeResult,
+    baseline::ProtoEwmaBaselineEstimator,
+    pipeline::analyze_snapshot,
     rate::{
-        compute::{compute_rates, diff_stats, read_snapshot},
-        model::{ProtoRate, ProtoRateSnapshot, ProtoSnapshot},
+        {ProtoRate, ProtoRateSnapshot, TrafficCountersSnapshot},
+        {compute_rates, diff_stats, read_snapshot},
     },
 };
 use ebpf_xdp_program_common::{ProtoIndex, ProtoStats};
 use std::time::Duration;
 use tokio::signal;
+
+const STATS_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const MIX_AGG_INTERVAL: Duration = Duration::from_secs(5);
+const ANOMALY_EVAL_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -81,20 +89,20 @@ async fn main() -> anyhow::Result<()> {
             .context("PROTO_STATS map not found")?,
     )?;
 
-    let mut poll_1s = tokio::time::interval(Duration::from_secs(1));
-    let mut report_5s = tokio::time::interval(Duration::from_secs(5));
-    let mut rate_60s = tokio::time::interval(Duration::from_secs(60));
+    let mut stats_poll_tick = tokio::time::interval(STATS_POLL_INTERVAL);
+    let mut mix_aggregation_tick = tokio::time::interval(MIX_AGG_INTERVAL);
+    let mut anomaly_eval_tick = tokio::time::interval(ANOMALY_EVAL_INTERVAL);
 
-    let mut last_mix_snapshot: Option<ProtoSnapshot> = None;
-    let mut last_rate_snapshot: Option<ProtoSnapshot> = None;
-    let mut latest_snapshot: Option<ProtoSnapshot> = None;
+    let mut current_counters: Option<TrafficCountersSnapshot> = None;
+    let mut prev_mix_counters: Option<TrafficCountersSnapshot> = None;
+    let mut prev_anomaly_counters: Option<TrafficCountersSnapshot> = None;
 
-    let mut ewma_baseline = ProtoEwmaBaseline::new(0.2);
+    let mut traffic_baseline = ProtoEwmaBaselineEstimator::new(0.2);
     loop {
         tokio::select! {
-            _ = poll_1s.tick() => {
+            _ = stats_poll_tick.tick() => {
                 let curr = read_snapshot(&proto_stats)?;
-                latest_snapshot = Some(curr.clone());
+                current_counters = Some(curr.clone());
 
                 for (idx, s) in curr.stats.iter().enumerate() {
                     let Some(proto) = ProtoIndex::from_index(idx) else { continue };
@@ -107,50 +115,53 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
             }
-            _ = report_5s.tick() => {
-                let Some(curr) = &latest_snapshot else { continue };
-                let Some(prev) = &last_mix_snapshot else {
-                    last_mix_snapshot = Some(curr.clone());
+            _ = mix_aggregation_tick.tick() => {
+                let Some(curr) = &current_counters else { continue };
+                let Some(prev) = &prev_mix_counters else {
+                    prev_mix_counters = Some(curr.clone());
                     continue;
                 };
 
-                let delta = diff_stats(&curr.stats, &prev.stats);
-                let interval_secs = 5.0;
+                let mix_delta = diff_stats(&curr.stats, &prev.stats);
+                let window_secs = MIX_AGG_INTERVAL.as_secs_f64();
 
-                let rate_snapshot = ProtoRateSnapshot {
+                let mix_rate_snapshot = ProtoRateSnapshot {
                     timestamp: curr.timestamp,
-                    rates: delta
+                    rates: mix_delta
                         .iter()
                         .enumerate()
                         .filter_map(|(idx, d)| -> Option<ProtoRate> {
                             let proto = ProtoIndex::from_index(idx)?;
                             Some(ProtoRate {
                                 proto,
-                                pps: d.packets as f64 / interval_secs,
-                                bps: d.bytes as f64 * 8.0 / interval_secs,
+                                pps: d.packets as f64 / window_secs,
+                                bps: d.bytes as f64 * 8.0 / window_secs,
                             })
                         })
                         .collect(),
                 };
 
-                ewma_baseline.update(&rate_snapshot.rates);
+                traffic_baseline.update(&mix_rate_snapshot.rates);
 
-                let total_packets: u64 = delta.iter().map(|s| s.packets).sum();
-                let total_bytes: u64 = delta.iter().map(|s| s.bytes).sum();
+                let total_packets: u64 = mix_delta.iter().map(|s| s.packets).sum();
+                let total_bytes: u64 = mix_delta.iter().map(|s| s.bytes).sum();
 
                 if total_packets > 0 {
-                    let tcp = delta[ProtoIndex::Tcp as usize].packets;
-                    let udp = delta[ProtoIndex::Udp as usize].packets;
+                    let icmp = mix_delta[ProtoIndex::Icmp as usize].packets;
+                    let tcp = mix_delta[ProtoIndex::Tcp as usize].packets;
+                    let udp = mix_delta[ProtoIndex::Udp as usize].packets;
 
                     tracing::info!(
-                        "mix(5s packets): TCP={:.1}%, UDP={:.1}%",
+                        "mix(5s packets): ICMP={:.1}%, TCP={:.1}%, UDP={:.1}%",
+                        icmp as f64 * 100.0 / total_packets as f64,
                         tcp as f64 * 100.0 / total_packets as f64,
                         udp as f64 * 100.0 / total_packets as f64,
+
                     );
                 }
 
                 if total_bytes > 0 {
-                    let ipv6 = delta[ProtoIndex::Ipv6 as usize].bytes;
+                    let ipv6 = mix_delta[ProtoIndex::Ipv6 as usize].bytes;
                     tracing::info!(
                         "mix(5s bytes): IPv6={:.1}%, IPv4={:.1}%",
                         ipv6 as f64 * 100.0 / total_bytes as f64,
@@ -158,35 +169,47 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
 
-                last_mix_snapshot = Some(curr.clone());
+                prev_mix_counters = Some(curr.clone());
             }
-            _ = rate_60s.tick() => {
-                let Some(curr) = &latest_snapshot else { continue };
+            _ = anomaly_eval_tick.tick() => {
+                let Some(curr) = &current_counters else { continue };
+                let Some(prev) = &prev_anomaly_counters else {
+                    prev_anomaly_counters = Some(curr.clone());
+                    continue;
+                };
 
-                if let Some(prev) = &last_rate_snapshot {
-                    let rates = compute_rates(prev, curr);
+                let rates = compute_rates(prev, curr);
 
-                    let snapshot = ProtoRateSnapshot {
-                        timestamp: curr.timestamp,
-                        rates,
-                    };
+                let anomaly_rate_snapshot = ProtoRateSnapshot {
+                    timestamp: curr.timestamp,
+                    rates,
+                };
 
-                    match analyze_snapshot(&snapshot, &mut ewma_baseline) {
-                        AnalyzeResult::WarmingUp => {
-                            tracing::info!("baseline warming up");
-                        }
+                match analyze_snapshot(&anomaly_rate_snapshot, &mut traffic_baseline) {
+                    AnalyzeResult::WarmingUp => {
+                        tracing::info!("baseline warming up");
+                    }
 
-                        AnalyzeResult::Normal(decisions) => {
-                            for decision in decisions {
-                                if let Some(alert) = decision_to_alert(&decision) {
-                                    emit_alert(alert);
-                                }
+                    AnalyzeResult::Normal(decisions) => {
+                        for decision in decisions {
+                            tracing::info!(
+                                "analyze proto {} -> pps={:.1}, bps={:.1}, z_pps={:?}, z_bps={:?}, level={:?}, confidence={:.2}",
+                                decision.proto.label(),
+                                decision.observed_pps,
+                                decision.observed_bps,
+                                decision.z_pps,
+                                decision.z_bps,
+                                decision.anomaly_level,
+                                decision.confidence(),
+                            );
+                            if let Some(alert) = decision_to_alert(&decision) {
+                                emit_alert(alert);
                             }
                         }
                     }
                 }
 
-                last_rate_snapshot = Some(curr.clone());
+                prev_anomaly_counters = Some(curr.clone());
             }
             _ = signal::ctrl_c() => {
                 tracing::info!("Exiting...");

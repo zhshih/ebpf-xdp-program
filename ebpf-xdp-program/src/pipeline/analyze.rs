@@ -1,12 +1,12 @@
-use crate::stats::{
-    anomaly::classifier::{AnalyzeResult, AnomalyDecision, AnomalyLevel, classify},
-    baseline::proto::ProtoEwmaBaseline,
-    rate::model::ProtoRateSnapshot,
+use crate::{
+    anomaly::{AnalyzeResult, AnomalyDecision, AnomalyLevel, anomaly_level_from_z},
+    baseline::{ProtoBaseline, ProtoEwmaBaselineEstimator},
+    rate::ProtoRateSnapshot,
 };
 
 pub fn analyze_snapshot(
     snapshot: &ProtoRateSnapshot,
-    baseline: &mut ProtoEwmaBaseline,
+    baseline: &mut ProtoEwmaBaselineEstimator,
 ) -> AnalyzeResult {
     let mut decisions = Vec::new();
 
@@ -16,8 +16,8 @@ pub fn analyze_snapshot(
             None => continue,
         };
 
-        let pps_level = classify(z_pps);
-        let bps_level = classify(z_bps);
+        let pps_level = anomaly_level_from_z(z_pps);
+        let bps_level = anomaly_level_from_z(z_bps);
 
         let anomaly_level = match (pps_level, bps_level) {
             (Some(AnomalyLevel::Severe), _) | (_, Some(AnomalyLevel::Severe)) => {
@@ -38,10 +38,12 @@ pub fn analyze_snapshot(
 
         let decision = AnomalyDecision {
             proto: rate.proto,
-            pps: rate.pps,
-            bps: rate.bps,
-            pps_baseline: base.pps,
-            bps_baseline: base.bps,
+            observed_pps: rate.pps,
+            observed_bps: rate.bps,
+            baseline: ProtoBaseline {
+                pps: base.pps,
+                bps: base.bps,
+            },
             z_pps,
             z_bps,
             anomaly_level,

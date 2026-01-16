@@ -1,5 +1,7 @@
-use crate::stats::alert::model::{Alert, AlertKind};
-use crate::stats::anomaly::classifier::AnomalyDecision;
+use crate::{
+    alert::{Alert, AlertKind},
+    anomaly::AnomalyDecision,
+};
 
 pub fn decision_to_alert(decision: &AnomalyDecision) -> Option<Alert> {
     if decision.anomaly_level.is_normal() {

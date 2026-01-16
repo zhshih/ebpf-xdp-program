@@ -1,4 +1,4 @@
-use crate::{ProtoIndex, stats::baseline::proto::Baseline};
+use crate::{ProtoIndex, baseline::ProtoBaseline};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnomalyLevel {
@@ -19,6 +19,7 @@ pub enum AnalyzeResult {
 }
 
 impl AnalyzeResult {
+    #[allow(dead_code)]
     pub fn decisions(&self) -> &[AnomalyDecision] {
         match self {
             AnalyzeResult::Normal(d) => d,
@@ -26,6 +27,7 @@ impl AnalyzeResult {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_warming_up(&self) -> bool {
         matches!(self, AnalyzeResult::WarmingUp)
     }
@@ -35,10 +37,9 @@ impl AnalyzeResult {
 #[derive(Debug)]
 pub struct AnomalyDecision {
     pub proto: ProtoIndex,
-    pub pps: f64,
-    pub bps: f64,
-    pub pps_baseline: Baseline,
-    pub bps_baseline: Baseline,
+    pub observed_pps: f64,
+    pub observed_bps: f64,
+    pub baseline: ProtoBaseline,
     pub z_pps: Option<f64>,
     pub z_bps: Option<f64>,
     pub anomaly_level: AnomalyLevel,
@@ -60,7 +61,7 @@ impl AnomalyDecision {
     }
 }
 
-pub fn classify(z: Option<f64>) -> Option<AnomalyLevel> {
+pub fn anomaly_level_from_z(z: Option<f64>) -> Option<AnomalyLevel> {
     z.map(|v| {
         let a = v.abs();
         if a < 3.0 {

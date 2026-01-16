@@ -1,4 +1,4 @@
-use crate::stats::anomaly::classifier::AnomalyLevel;
+use crate::anomaly::classifier::AnomalyLevel;
 use ebpf_xdp_program_common::ProtoIndex;
 
 #[derive(Debug, Clone)]

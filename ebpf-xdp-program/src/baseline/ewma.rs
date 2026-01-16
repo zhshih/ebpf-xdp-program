@@ -1,4 +1,4 @@
-use crate::stats::anomaly::zscore::robust_z_score_clipped;
+use crate::anomaly::robust_z_score_clipped;
 use std::time::{Duration, Instant};
 
 const MIN_SAMPLES: u64 = 5;

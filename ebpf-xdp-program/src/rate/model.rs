@@ -2,15 +2,15 @@ use ebpf_xdp_program_common::ProtoIndex;
 use std::time::Instant;
 
 #[derive(Default, Clone)]
-pub struct AccumulatedStats {
+pub struct TrafficCounters {
     pub packets: u64,
     pub bytes: u64,
 }
 
 #[derive(Clone)]
-pub struct ProtoSnapshot {
+pub struct TrafficCountersSnapshot {
     pub timestamp: Instant,
-    pub stats: Vec<AccumulatedStats>,
+    pub stats: Vec<TrafficCounters>,
 }
 
 #[derive(Debug, Clone)]
