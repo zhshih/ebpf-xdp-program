@@ -9,7 +9,9 @@ use clap::Parser;
 #[rustfmt::skip]
 use log::{debug, warn};
 use crate::stats::{
+    alert::semantics::{decision_to_alert, emit_alert},
     analyze::analyze_snapshot,
+    anomaly::classifier::AnalyzeResult,
     baseline::proto::ProtoEwmaBaseline,
     rate::{
         compute::{compute_rates, diff_stats, read_snapshot},
@@ -169,14 +171,18 @@ async fn main() -> anyhow::Result<()> {
                         rates,
                     };
 
-                    let result = analyze_snapshot(&snapshot, &mut ewma_baseline);
+                    match analyze_snapshot(&snapshot, &mut ewma_baseline) {
+                        AnalyzeResult::WarmingUp => {
+                            tracing::info!("baseline warming up");
+                        }
 
-                    if result.is_warming_up() {
-                        tracing::info!("baseline warming up");
-                    }
-
-                    for d in result.decisions() {
-                        tracing::info!("{:?}", d);
+                        AnalyzeResult::Normal(decisions) => {
+                            for decision in decisions {
+                                if let Some(alert) = decision_to_alert(&decision) {
+                                    emit_alert(alert);
+                                }
+                            }
+                        }
                     }
                 }
 
