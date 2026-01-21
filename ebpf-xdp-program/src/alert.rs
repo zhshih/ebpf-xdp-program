@@ -1,5 +1,6 @@
+pub mod manager;
 pub mod model;
-pub mod semantics;
+pub mod state;
 
-pub use model::{Alert, AlertKind};
-pub use semantics::{decision_to_alert, emit_alert};
+pub use manager::{AlertEvent, AlertManager, AlertRule};
+pub use model::{AlertKind, AlertSignal};

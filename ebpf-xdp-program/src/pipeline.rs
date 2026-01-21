@@ -1,3 +1,3 @@
 pub mod analyze;
 
-pub use analyze::analyze_snapshot;
+pub use analyze::{PipelineOutcome, run_anomaly_pipeline};

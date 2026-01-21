@@ -13,13 +13,13 @@ use clap::Parser;
 #[rustfmt::skip]
 use log::{debug, warn};
 use crate::{
-    alert::{decision_to_alert, emit_alert},
-    anomaly::AnalyzeResult,
-    baseline::ProtoEwmaBaselineEstimator,
-    pipeline::analyze_snapshot,
+    alert::{AlertKind, AlertManager, AlertRule},
+    anomaly::AnomalyLevel,
+    baseline::proto::{ProtoEwmaBaselineEstimator, Readiness},
+    pipeline::{PipelineOutcome, run_anomaly_pipeline},
     rate::{
-        {ProtoRate, ProtoRateSnapshot, TrafficCountersSnapshot},
-        {compute_rates, diff_stats, read_snapshot},
+        ProtoRate, ProtoRateSnapshot, TrafficCountersSnapshot, compute_rates, diff_stats,
+        read_snapshot,
     },
 };
 use ebpf_xdp_program_common::{ProtoIndex, ProtoStats};
@@ -97,7 +97,18 @@ async fn main() -> anyhow::Result<()> {
     let mut prev_mix_counters: Option<TrafficCountersSnapshot> = None;
     let mut prev_anomaly_counters: Option<TrafficCountersSnapshot> = None;
 
-    let mut traffic_baseline = ProtoEwmaBaselineEstimator::new(0.2);
+    let mut traffic_baseline =
+        ProtoEwmaBaselineEstimator::new(0.4, 20, 1e-3, Duration::from_secs(60));
+
+    let rules = vec![AlertRule {
+        kind: AlertKind::Spike,
+        min_level: AnomalyLevel::Suspicious,
+        min_confidence: 0.6,
+        for_duration: Duration::from_secs(30),
+        cooldown: Duration::from_secs(120),
+    }];
+    let mut alert_manager = AlertManager::new(rules);
+
     loop {
         tokio::select! {
             _ = stats_poll_tick.tick() => {
@@ -141,7 +152,13 @@ async fn main() -> anyhow::Result<()> {
                         .collect(),
                 };
 
-                traffic_baseline.update(&mix_rate_snapshot.rates);
+                for idx in 0..ProtoIndex::COUNT {
+                    let proto = ProtoIndex::from_index(idx as usize).unwrap();
+                    if traffic_baseline.readiness(proto) != Readiness::Ready {
+                        tracing::info!("updating traffic baseline...");
+                        traffic_baseline.update(&mix_rate_snapshot.rates);
+                    }
+                }
 
                 let total_packets: u64 = mix_delta.iter().map(|s| s.packets).sum();
                 let total_bytes: u64 = mix_delta.iter().map(|s| s.bytes).sum();
@@ -162,7 +179,7 @@ async fn main() -> anyhow::Result<()> {
 
                 if total_bytes > 0 {
                     let ipv6 = mix_delta[ProtoIndex::Ipv6 as usize].bytes;
-                    tracing::info!(
+                    tracing::debug!(
                         "mix(5s bytes): IPv6={:.1}%, IPv4={:.1}%",
                         ipv6 as f64 * 100.0 / total_bytes as f64,
                         100.0 - ipv6 as f64 * 100.0 / total_bytes as f64,
@@ -180,31 +197,36 @@ async fn main() -> anyhow::Result<()> {
 
                 let rates = compute_rates(prev, curr);
 
-                let anomaly_rate_snapshot = ProtoRateSnapshot {
+                let rate_snapshot = ProtoRateSnapshot {
                     timestamp: curr.timestamp,
                     rates,
                 };
 
-                match analyze_snapshot(&anomaly_rate_snapshot, &mut traffic_baseline) {
-                    AnalyzeResult::WarmingUp => {
+               match run_anomaly_pipeline(
+                    &rate_snapshot,
+                    &mut traffic_baseline,
+                    &mut alert_manager,
+                ) {
+                    PipelineOutcome::WarmingUp => {
                         tracing::info!("baseline warming up");
                     }
 
-                    AnalyzeResult::Normal(decisions) => {
-                        for decision in decisions {
-                            tracing::info!(
-                                "analyze proto {} -> pps={:.1}, bps={:.1}, z_pps={:?}, z_bps={:?}, level={:?}, confidence={:.2}",
-                                decision.proto.label(),
-                                decision.observed_pps,
-                                decision.observed_bps,
-                                decision.z_pps,
-                                decision.z_bps,
-                                decision.anomaly_level,
-                                decision.confidence(),
+                    PipelineOutcome::NoSignals => {
+                        tracing::info!("no alert signals generated during anomaly evaluation");
+                    }
+
+                    PipelineOutcome::Events {
+                        events,
+                    } => {
+                        for event in events {
+                            tracing::warn!(
+                                proto = ?event.alert.proto,
+                                level = ?event.alert.level,
+                                kind = ?event.alert.kind,
+                                state = ?event.state,
+                                confidence = event.alert.confidence,
+                                "alert event"
                             );
-                            if let Some(alert) = decision_to_alert(&decision) {
-                                emit_alert(alert);
-                            }
                         }
                     }
                 }

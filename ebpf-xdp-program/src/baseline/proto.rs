@@ -1,8 +1,22 @@
 use crate::{baseline::Ewma, rate::ProtoRate};
 use ebpf_xdp_program_common::ProtoIndex;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
-#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Readiness {
+    NotEnoughSamples,
+    LowVariance,
+    WarmupTime,
+    Ready,
+}
+
+#[derive(Debug)]
+pub enum BaselineState {
+    Ready { baseline: ProtoBaseline },
+    Warming { reason: Readiness },
+}
+
 #[derive(Debug, Clone)]
 pub struct BaselineStats {
     pub mean: f64,
@@ -15,14 +29,33 @@ pub struct ProtoBaseline {
     pub bps: BaselineStats,
 }
 
+impl ProtoBaseline {
+    pub fn zero() -> Self {
+        Self {
+            pps: BaselineStats {
+                mean: 0.0,
+                stddev: 0.0,
+            },
+            bps: BaselineStats {
+                mean: 0.0,
+                stddev: 0.0,
+            },
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ProtoEwmaBaselineEstimator {
     pps_ewma: HashMap<ProtoIndex, Ewma>,
     bps_ewma: HashMap<ProtoIndex, Ewma>,
+    min_samples: u64,
+    min_stddev: f64,
+    min_elapsed: Duration,
+    start_time: Instant,
 }
 
 impl ProtoEwmaBaselineEstimator {
-    pub fn new(alpha: f64) -> Self {
+    pub fn new(alpha: f64, min_samples: u64, min_stddev: f64, min_elapsed: Duration) -> Self {
         let mut pps = HashMap::new();
         let mut bps = HashMap::new();
 
@@ -35,7 +68,50 @@ impl ProtoEwmaBaselineEstimator {
         Self {
             pps_ewma: pps,
             bps_ewma: bps,
+            min_samples,
+            min_stddev,
+            min_elapsed,
+            start_time: Instant::now(),
         }
+    }
+
+    pub fn snapshot(&self, proto: ProtoIndex) -> BaselineState {
+        let pps = self.pps_ewma.get(&proto).unwrap();
+        let bps = self.bps_ewma.get(&proto).unwrap();
+
+        let samples = pps.samples.min(bps.samples);
+        let elapsed = self.start_time.elapsed();
+
+        let baseline = ProtoBaseline {
+            pps: BaselineStats {
+                mean: pps.mean(),
+                stddev: pps.stddev(),
+            },
+            bps: BaselineStats {
+                mean: bps.mean(),
+                stddev: bps.stddev(),
+            },
+        };
+
+        if samples < self.min_samples {
+            return BaselineState::Warming {
+                reason: Readiness::NotEnoughSamples,
+            };
+        }
+
+        if baseline.pps.stddev < self.min_stddev || baseline.bps.stddev < self.min_stddev {
+            return BaselineState::Warming {
+                reason: Readiness::LowVariance,
+            };
+        }
+
+        if elapsed < self.min_elapsed {
+            return BaselineState::Warming {
+                reason: Readiness::WarmupTime,
+            };
+        }
+
+        BaselineState::Ready { baseline }
     }
 
     pub fn update(&mut self, observed_rates: &[ProtoRate]) {
@@ -49,39 +125,41 @@ impl ProtoEwmaBaselineEstimator {
         }
     }
 
-    pub fn is_ready(&self) -> bool {
-        self.pps_ewma.values().all(|ewma| ewma.is_ready())
-            && self.bps_ewma.values().all(|ewma| ewma.is_ready())
+    pub fn readiness(&self, proto: ProtoIndex) -> Readiness {
+        if self.start_time.elapsed() < self.min_elapsed {
+            return Readiness::WarmupTime;
+        }
+
+        let pps = match self.pps_ewma.get(&proto) {
+            Some(e) => e,
+            None => return Readiness::NotEnoughSamples,
+        };
+
+        let bps = match self.bps_ewma.get(&proto) {
+            Some(e) => e,
+            None => return Readiness::NotEnoughSamples,
+        };
+
+        if pps.samples < self.min_samples || bps.samples < self.min_samples {
+            return Readiness::NotEnoughSamples;
+        }
+
+        Readiness::Ready
+    }
+}
+
+pub trait AnomalyBaseline {
+    #[allow(dead_code)]
+    fn readiness(&self, proto: ProtoIndex) -> Readiness;
+    fn snapshot(&self, proto: ProtoIndex) -> BaselineState;
+}
+
+impl AnomalyBaseline for ProtoEwmaBaselineEstimator {
+    fn readiness(&self, proto: ProtoIndex) -> Readiness {
+        self.readiness(proto)
     }
 
-    pub fn baseline(&self, proto: ProtoIndex) -> Option<ProtoBaseline> {
-        let pps_ewma = self.pps_ewma.get(&proto)?;
-        let bps_ewma = self.bps_ewma.get(&proto)?;
-
-        Some(ProtoBaseline {
-            pps: BaselineStats {
-                mean: pps_ewma.mean()?,
-                stddev: pps_ewma.stddev()?,
-            },
-            bps: BaselineStats {
-                mean: bps_ewma.mean()?,
-                stddev: bps_ewma.stddev()?,
-            },
-        })
-    }
-
-    pub fn z_scores(
-        &self,
-        proto: ProtoIndex,
-        observed_pps: f64,
-        observed_bps: f64,
-    ) -> Option<(Option<f64>, Option<f64>)> {
-        let pps_ewma = self.pps_ewma.get(&proto)?;
-        let bps_ewma = self.bps_ewma.get(&proto)?;
-
-        let z_pps = pps_ewma.robust_z_score(observed_pps);
-        let z_bps = bps_ewma.robust_z_score(observed_bps);
-
-        Some((z_pps, z_bps))
+    fn snapshot(&self, proto: ProtoIndex) -> BaselineState {
+        self.snapshot(proto)
     }
 }
