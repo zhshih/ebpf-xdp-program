@@ -14,13 +14,10 @@ use clap::Parser;
 use log::{debug, warn};
 use crate::{
     alert::{AlertKind, AlertManager, AlertRule},
-    anomaly::AnomalyLevel,
-    baseline::proto::{ProtoEwmaBaselineEstimator, Readiness},
+    anomaly::{AnomalyLevel, EmergencyDetector, EmergencyThreshold, EwmaDetector},
+    baseline::EwmaEstimator,
     pipeline::{PipelineOutcome, run_anomaly_pipeline},
-    rate::{
-        ProtoRate, ProtoRateSnapshot, TrafficCountersSnapshot, compute_rates, diff_stats,
-        read_snapshot,
-    },
+    rate::{ProtoRateSnapshot, TrafficCountersSnapshot, compute_rates, diff_stats, read_snapshot},
 };
 use ebpf_xdp_program_common::{ProtoIndex, ProtoStats};
 use std::time::Duration;
@@ -28,7 +25,7 @@ use tokio::signal;
 
 const STATS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MIX_AGG_INTERVAL: Duration = Duration::from_secs(5);
-const ANOMALY_EVAL_INTERVAL: Duration = Duration::from_secs(60);
+const ANOMALY_EVAL_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -97,17 +94,36 @@ async fn main() -> anyhow::Result<()> {
     let mut prev_mix_counters: Option<TrafficCountersSnapshot> = None;
     let mut prev_anomaly_counters: Option<TrafficCountersSnapshot> = None;
 
-    let mut traffic_baseline =
-        ProtoEwmaBaselineEstimator::new(0.4, 20, 1e-3, Duration::from_secs(60));
+    let mut traffic_baseline = EwmaEstimator::new(0.4, 5, 1e-3, Duration::from_secs(120));
 
-    let rules = vec![AlertRule {
-        kind: AlertKind::Spike,
-        min_level: AnomalyLevel::Suspicious,
-        min_confidence: 0.6,
-        for_duration: Duration::from_secs(30),
-        cooldown: Duration::from_secs(120),
-    }];
+    let rules = vec![
+        AlertRule {
+            kind: AlertKind::Spike,
+            min_level: AnomalyLevel::Suspicious,
+            min_confidence: 0.6,
+            cooldown: Duration::from_secs(120),
+            consecutive_threshold: 5,
+            resolve_consecutive_threshold: 3,
+            freezes_baseline: true,
+        },
+        AlertRule {
+            kind: AlertKind::Emergency,
+            min_level: AnomalyLevel::Severe,
+            min_confidence: 0.0,
+            cooldown: Duration::from_secs(60),
+            consecutive_threshold: 1,
+            resolve_consecutive_threshold: 1,
+            freezes_baseline: false,
+        },
+    ];
     let mut alert_manager = AlertManager::new(rules);
+
+    let emergency_detector = EmergencyDetector::new(vec![EmergencyThreshold {
+        proto: ProtoIndex::Icmp,
+        max_pps: Some(3.0),
+        max_bps: None,
+    }]);
+    let mut baseline_warmed_up = false;
 
     loop {
         tokio::select! {
@@ -134,31 +150,6 @@ async fn main() -> anyhow::Result<()> {
                 };
 
                 let mix_delta = diff_stats(&curr.stats, &prev.stats);
-                let window_secs = MIX_AGG_INTERVAL.as_secs_f64();
-
-                let mix_rate_snapshot = ProtoRateSnapshot {
-                    timestamp: curr.timestamp,
-                    rates: mix_delta
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(idx, d)| -> Option<ProtoRate> {
-                            let proto = ProtoIndex::from_index(idx)?;
-                            Some(ProtoRate {
-                                proto,
-                                pps: d.packets as f64 / window_secs,
-                                bps: d.bytes as f64 * 8.0 / window_secs,
-                            })
-                        })
-                        .collect(),
-                };
-
-                for idx in 0..ProtoIndex::COUNT {
-                    let proto = ProtoIndex::from_index(idx as usize).unwrap();
-                    if traffic_baseline.readiness(proto) != Readiness::Ready {
-                        tracing::info!("updating traffic baseline...");
-                        traffic_baseline.update(&mix_rate_snapshot.rates);
-                    }
-                }
 
                 let total_packets: u64 = mix_delta.iter().map(|s| s.packets).sum();
                 let total_bytes: u64 = mix_delta.iter().map(|s| s.bytes).sum();
@@ -202,11 +193,25 @@ async fn main() -> anyhow::Result<()> {
                     rates,
                 };
 
-               match run_anomaly_pipeline(
+                let ewma_detector = EwmaDetector::new(&traffic_baseline);
+                let outcome = run_anomaly_pipeline(
                     &rate_snapshot,
-                    &mut traffic_baseline,
+                    &ewma_detector,
+                    &emergency_detector,
                     &mut alert_manager,
-                ) {
+                );
+
+                if !alert_manager.is_baseline_frozen(curr.timestamp) {
+                    tracing::info!("updating traffic baseline");
+                    traffic_baseline.update(&rate_snapshot.rates);
+                }
+
+                if !baseline_warmed_up && !matches!(outcome, PipelineOutcome::WarmingUp) {
+                    baseline_warmed_up = true;
+                    tracing::info!("baseline ready");
+                }
+
+                match outcome {
                     PipelineOutcome::WarmingUp => {
                         tracing::info!("baseline warming up");
                     }
@@ -223,7 +228,7 @@ async fn main() -> anyhow::Result<()> {
                                 proto = ?event.alert.proto,
                                 level = ?event.alert.level,
                                 kind = ?event.alert.kind,
-                                state = ?event.state,
+                                state = ?event.lifecycle,
                                 confidence = event.alert.confidence,
                                 "alert event"
                             );

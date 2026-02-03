@@ -1,5 +1,5 @@
+pub mod estimator;
 pub mod ewma;
-pub mod proto;
 
+pub use estimator::{Baseline, BaselineState, EwmaEstimator, ProtoBaseline};
 pub use ewma::Ewma;
-pub use proto::{AnomalyBaseline, BaselineState, ProtoBaseline, Readiness};

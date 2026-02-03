@@ -1,15 +1,13 @@
 use std::time::Instant;
 
-use crate::anomaly::classifier::AnomalyLevel;
+use crate::anomaly::AnomalyLevel;
 use ebpf_xdp_program_common::ProtoIndex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AlertKind {
     Spike,
     Drop,
-
-    #[allow(dead_code)]
-    Anomaly,
+    Emergency,
 }
 
 #[derive(Debug, Clone)]

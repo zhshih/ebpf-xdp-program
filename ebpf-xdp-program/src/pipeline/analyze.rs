@@ -1,7 +1,6 @@
 use crate::{
-    alert::{AlertEvent, AlertKind, AlertManager, AlertSignal},
-    anomaly::{self, AnalyzeResult, AnomalyObservation},
-    baseline::AnomalyBaseline,
+    alert::{AlertEvent, AlertManager, AlertSignal},
+    anomaly::{AnomalyDetector, DetectResult},
     rate::ProtoRateSnapshot,
 };
 
@@ -11,66 +10,36 @@ pub enum PipelineOutcome {
     Events { events: Vec<AlertEvent> },
 }
 
-pub fn run_anomaly_pipeline<B: AnomalyBaseline>(
+pub fn run_anomaly_pipeline(
     snapshot: &ProtoRateSnapshot,
-    baseline: &mut B,
+    ewma: &dyn AnomalyDetector,
+    emergency: &dyn AnomalyDetector,
     alert_manager: &mut AlertManager,
 ) -> PipelineOutcome {
-    let result = anomaly::observe_anomaly(snapshot, baseline);
+    let results = [ewma.detect(snapshot), emergency.detect(snapshot)];
 
-    match result {
-        AnalyzeResult::WarmingUp => PipelineOutcome::WarmingUp,
+    let any_warming = results.iter().any(|r| matches!(r, DetectResult::WarmingUp));
+    let all_signals: Vec<AlertSignal> = results
+        .into_iter()
+        .flat_map(|r| match r {
+            DetectResult::WarmingUp => vec![],
+            DetectResult::Signals(s) => s,
+        })
+        .collect();
 
-        AnalyzeResult::Normal(obs) => {
-            let signals: Vec<_> = obs.iter().filter_map(observation_to_signal).collect();
-
-            if signals.is_empty() {
-                return PipelineOutcome::NoSignals;
-            }
-
-            tracing::info!("generated {:?} signals", signals);
-            let events = alert_manager.evaluate(&signals, snapshot.timestamp);
-
-            PipelineOutcome::Events { events }
-        }
-    }
-}
-
-fn observation_to_signal(observation: &AnomalyObservation) -> Option<AlertSignal> {
-    tracing::info!(
-        "classifying anomaly observation for proto {:?}: level={:?}, z_pps={:?}, z_bps={:?}, confidence={}",
-        observation.proto,
-        observation.anomaly_level,
-        observation.z_pps,
-        observation.z_bps,
-        observation.confidence()
-    );
-    if observation.anomaly_level.is_normal() {
-        return None;
+    if !all_signals.is_empty() {
+        tracing::info!("generated {} total signals", all_signals.len());
     }
 
-    let kind = match observation.dominant_z() {
-        Some(z) => {
-            if z >= 0.0 {
-                AlertKind::Spike
-            } else {
-                AlertKind::Drop
-            }
-        }
-        None => AlertKind::Spike,
-    };
+    let events = alert_manager.evaluate(&all_signals, snapshot.timestamp);
 
-    tracing::info!(
-        "generated alert signal for proto {:?}: level={:?}, z={:?}, confidence={}",
-        observation.proto,
-        observation.anomaly_level,
-        observation.dominant_z(),
-        observation.confidence()
-    );
-    Some(AlertSignal {
-        proto: observation.proto,
-        level: observation.anomaly_level,
-        kind,
-        confidence: observation.confidence(),
-    })
+    if events.is_empty() {
+        if any_warming {
+            PipelineOutcome::WarmingUp
+        } else {
+            PipelineOutcome::NoSignals
+        }
+    } else {
+        PipelineOutcome::Events { events }
+    }
 }

@@ -3,18 +3,10 @@ use ebpf_xdp_program_common::ProtoIndex;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Readiness {
-    NotEnoughSamples,
-    LowVariance,
-    WarmupTime,
-    Ready,
-}
-
 #[derive(Debug)]
 pub enum BaselineState {
     Ready { baseline: ProtoBaseline },
-    Warming { reason: Readiness },
+    Warming,
 }
 
 #[derive(Debug, Clone)]
@@ -29,23 +21,8 @@ pub struct ProtoBaseline {
     pub bps: BaselineStats,
 }
 
-impl ProtoBaseline {
-    pub fn zero() -> Self {
-        Self {
-            pps: BaselineStats {
-                mean: 0.0,
-                stddev: 0.0,
-            },
-            bps: BaselineStats {
-                mean: 0.0,
-                stddev: 0.0,
-            },
-        }
-    }
-}
-
 #[derive(Debug)]
-pub struct ProtoEwmaBaselineEstimator {
+pub struct EwmaEstimator {
     pps_ewma: HashMap<ProtoIndex, Ewma>,
     bps_ewma: HashMap<ProtoIndex, Ewma>,
     min_samples: u64,
@@ -54,7 +31,7 @@ pub struct ProtoEwmaBaselineEstimator {
     start_time: Instant,
 }
 
-impl ProtoEwmaBaselineEstimator {
+impl EwmaEstimator {
     pub fn new(alpha: f64, min_samples: u64, min_stddev: f64, min_elapsed: Duration) -> Self {
         let mut pps = HashMap::new();
         let mut bps = HashMap::new();
@@ -93,24 +70,34 @@ impl ProtoEwmaBaselineEstimator {
             },
         };
 
-        if samples < self.min_samples {
-            return BaselineState::Warming {
-                reason: Readiness::NotEnoughSamples,
-            };
+        if samples < self.min_samples
+            || baseline.pps.stddev < self.min_stddev
+            || baseline.bps.stddev < self.min_stddev
+            || elapsed < self.min_elapsed
+        {
+            tracing::trace!(
+                proto = ?proto,
+                samples = samples,
+                min_samples = self.min_samples,
+                pps_stddev = baseline.pps.stddev,
+                bps_stddev = baseline.bps.stddev,
+                min_stddev = self.min_stddev,
+                elapsed_secs = elapsed.as_secs(),
+                min_elapsed_secs = self.min_elapsed.as_secs(),
+                "baseline warming"
+            );
+            return BaselineState::Warming;
         }
 
-        if baseline.pps.stddev < self.min_stddev || baseline.bps.stddev < self.min_stddev {
-            return BaselineState::Warming {
-                reason: Readiness::LowVariance,
-            };
-        }
-
-        if elapsed < self.min_elapsed {
-            return BaselineState::Warming {
-                reason: Readiness::WarmupTime,
-            };
-        }
-
+        tracing::debug!(
+            proto = ?proto,
+            pps_mean = baseline.pps.mean,
+            pps_stddev = baseline.pps.stddev,
+            bps_mean = baseline.bps.mean,
+            bps_stddev = baseline.bps.stddev,
+            samples = samples,
+            "baseline ready"
+        );
         BaselineState::Ready { baseline }
     }
 
@@ -124,41 +111,13 @@ impl ProtoEwmaBaselineEstimator {
             }
         }
     }
-
-    pub fn readiness(&self, proto: ProtoIndex) -> Readiness {
-        if self.start_time.elapsed() < self.min_elapsed {
-            return Readiness::WarmupTime;
-        }
-
-        let pps = match self.pps_ewma.get(&proto) {
-            Some(e) => e,
-            None => return Readiness::NotEnoughSamples,
-        };
-
-        let bps = match self.bps_ewma.get(&proto) {
-            Some(e) => e,
-            None => return Readiness::NotEnoughSamples,
-        };
-
-        if pps.samples < self.min_samples || bps.samples < self.min_samples {
-            return Readiness::NotEnoughSamples;
-        }
-
-        Readiness::Ready
-    }
 }
 
-pub trait AnomalyBaseline {
-    #[allow(dead_code)]
-    fn readiness(&self, proto: ProtoIndex) -> Readiness;
+pub trait Baseline {
     fn snapshot(&self, proto: ProtoIndex) -> BaselineState;
 }
 
-impl AnomalyBaseline for ProtoEwmaBaselineEstimator {
-    fn readiness(&self, proto: ProtoIndex) -> Readiness {
-        self.readiness(proto)
-    }
-
+impl Baseline for EwmaEstimator {
     fn snapshot(&self, proto: ProtoIndex) -> BaselineState {
         self.snapshot(proto)
     }

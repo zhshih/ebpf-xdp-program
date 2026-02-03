@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::{
     alert::{
         model::{Alert, AlertKind, AlertSignal},
-        state::{AlertEmission, AlertState, AlertStateKind},
+        state::{AlertLifecycle, AlertState},
     },
     anomaly::AnomalyLevel,
 };
@@ -20,12 +20,14 @@ pub struct AlertRule {
     pub kind: AlertKind,
     pub min_level: AnomalyLevel,
     pub min_confidence: f64,
-    pub for_duration: Duration,
     pub cooldown: Duration,
+    pub consecutive_threshold: u32,
+    pub resolve_consecutive_threshold: u32,
+    pub freezes_baseline: bool,
 }
 pub struct AlertEvent {
     pub alert: Alert,
-    pub state: AlertStateKind,
+    pub lifecycle: AlertLifecycle,
 }
 
 pub struct AlertManager {
@@ -47,8 +49,16 @@ impl AlertManager {
 
     pub fn evaluate(&mut self, signals: &[AlertSignal], now: Instant) -> Vec<AlertEvent> {
         let active = self.collect_active(signals);
-        tracing::info!("active alerts: {:?}", active.keys().collect::<Vec<_>>());
         self.advance_states(&active, now)
+    }
+
+    pub fn is_baseline_frozen(&self, now: Instant) -> bool {
+        self.states.iter().any(|(key, state)| {
+            self.rules
+                .iter()
+                .find(|r| r.kind == key.kind)
+                .is_some_and(|rule| rule.freezes_baseline && state.is_hot(now, rule.cooldown))
+        })
     }
 
     fn collect_active(&self, signals: &[AlertSignal]) -> HashMap<AlertKey, AlertSignal> {
@@ -104,56 +114,82 @@ impl AlertManager {
         let mut events = Vec::new();
 
         for rule in &self.rules {
-            let keys: Vec<AlertKey> = self
+            let mut keys: HashSet<AlertKey> = self
                 .states
                 .keys()
+                .filter(|k| k.kind == rule.kind)
                 .cloned()
-                .chain(active.keys().cloned())
                 .collect();
+            keys.extend(active.keys().filter(|k| k.kind == rule.kind).cloned());
+
+            tracing::debug!(
+                rule_kind = ?rule.kind,
+                active_signal_count = active.len(),
+                tracked_states_count = self.states.len(),
+                unique_keys = keys.len(),
+                "advancing alert states for rule"
+            );
 
             for key in keys {
                 let state = self.states.entry(key).or_insert_with(AlertState::new);
 
                 let signal = active.get(&key);
                 let is_active = signal.is_some();
-                tracing::info!(
-                    "advancing alert state for proto {:?} kind {:?}: is_active={}",
-                    key.proto,
-                    key.kind,
-                    is_active
+
+                tracing::trace!(
+                    proto = ?key.proto,
+                    kind = ?key.kind,
+                    state = ?state,
+                    signal_active = is_active,
+                    "processing alert state for key"
                 );
 
-                let emission = state.advance(is_active, now, rule.for_duration, rule.cooldown);
+                if let Some(lifecycle) = state.advance(
+                    is_active,
+                    now,
+                    rule.cooldown,
+                    rule.consecutive_threshold,
+                    rule.resolve_consecutive_threshold,
+                )
+                {
+                    match lifecycle {
+                        AlertLifecycle::Fired => {
+                            let s = signal.unwrap();
+                            tracing::info!(
+                                proto = ?s.proto,
+                                kind = ?s.kind,
+                                "firing alert"
+                            );
+                            events.push(AlertEvent {
+                                alert: Alert {
+                                    proto: s.proto,
+                                    kind: s.kind,
+                                    level: s.level,
+                                    confidence: s.confidence,
+                                    timestamp: now,
+                                },
+                                lifecycle,
+                            });
+                        }
 
-                match emission {
-                    AlertEmission::Fired => {
-                        let s = signal.unwrap();
-                        events.push(AlertEvent {
-                            alert: Alert {
-                                proto: s.proto,
-                                kind: s.kind,
-                                level: s.level,
-                                confidence: s.confidence,
-                                timestamp: now,
-                            },
-                            state: AlertStateKind::Firing,
-                        });
+                        AlertLifecycle::Resolved => {
+                            tracing::info!(
+                                proto = ?key.proto,
+                                kind = ?key.kind,
+                                "resolving alert"
+                            );
+                            events.push(AlertEvent {
+                                alert: Alert {
+                                    proto: key.proto,
+                                    kind: key.kind,
+                                    level: rule.min_level,
+                                    confidence: 0.0,
+                                    timestamp: now,
+                                },
+                                lifecycle,
+                            });
+                        }
                     }
-
-                    AlertEmission::Resolved => {
-                        events.push(AlertEvent {
-                            alert: Alert {
-                                proto: key.proto,
-                                kind: key.kind,
-                                level: rule.min_level,
-                                confidence: 0.0,
-                                timestamp: now,
-                            },
-                            state: AlertStateKind::Resolved,
-                        });
-                    }
-
-                    AlertEmission::None => {}
                 }
             }
         }
