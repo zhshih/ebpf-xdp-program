@@ -16,7 +16,7 @@ pub enum AlertLifecycle {
 #[derive(Debug)]
 pub struct AlertState {
     phase: AlertPhase,
-    consecutive_count: u32,
+    pub(crate) consecutive_count: u32,
     resolve_consecutive_count: u32,
     last_fired: Option<Instant>,
 }
@@ -115,6 +115,15 @@ impl AlertState {
                     }
                 }
             }
+        }
+    }
+
+    /// Returns 0=Inactive, 1=Pending, 2=Firing — for metrics export only.
+    pub(crate) fn phase_value(&self) -> u8 {
+        match self.phase {
+            AlertPhase::Inactive => 0,
+            AlertPhase::Pending => 1,
+            AlertPhase::Firing => 2,
         }
     }
 

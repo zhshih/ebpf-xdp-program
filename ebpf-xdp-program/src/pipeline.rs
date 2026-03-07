@@ -1,3 +1,3 @@
-pub mod analyze;
+mod runner;
 
-pub use analyze::{PipelineOutcome, run_anomaly_pipeline};
+pub use runner::AnomalyRunner;

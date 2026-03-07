@@ -1,6 +1,8 @@
 mod alert;
 mod anomaly;
 mod baseline;
+mod config;
+mod metrics;
 mod pipeline;
 mod rate;
 
@@ -13,11 +15,9 @@ use clap::Parser;
 #[rustfmt::skip]
 use log::{debug, warn};
 use crate::{
-    alert::{AlertKind, AlertManager, AlertRule},
-    anomaly::{AnomalyLevel, EmergencyDetector, EmergencyThreshold, EwmaDetector},
-    baseline::EwmaEstimator,
-    pipeline::{PipelineOutcome, run_anomaly_pipeline},
-    rate::{ProtoRateSnapshot, TrafficCountersSnapshot, compute_rates, diff_stats, read_snapshot},
+    alert::AlertManager,
+    pipeline::AnomalyRunner,
+    rate::{TrafficCountersSnapshot, compute_mix, diff_stats, read_snapshot},
 };
 use ebpf_xdp_program_common::{ProtoIndex, ProtoStats};
 use std::time::Duration;
@@ -31,6 +31,9 @@ const ANOMALY_EVAL_INTERVAL: Duration = Duration::from_secs(30);
 struct Opt {
     #[clap(short, long, default_value = "wlo1")]
     iface: String,
+
+    #[clap(long, default_value = "9091")]
+    metrics_port: u16,
 }
 
 #[tokio::main]
@@ -38,6 +41,8 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let opt = Opt::parse();
+    let metrics_handle = metrics::init(opt.metrics_port)?;
+    tracing::info!(port = opt.metrics_port, "Prometheus metrics listening");
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
     // new memcg based accounting, see https://lwn.net/Articles/837122/
@@ -75,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
             });
         }
     }
-    let Opt { iface } = opt;
+    let Opt { iface, .. } = opt;
     let program: &mut Xdp = ebpf.program_mut("ebpf_xdp_program").unwrap().try_into()?;
     program.load()?;
     program.attach(&iface, XdpFlags::default())
@@ -92,43 +97,22 @@ async fn main() -> anyhow::Result<()> {
 
     let mut current_counters: Option<TrafficCountersSnapshot> = None;
     let mut prev_mix_counters: Option<TrafficCountersSnapshot> = None;
-    let mut prev_anomaly_counters: Option<TrafficCountersSnapshot> = None;
-
-    let mut traffic_baseline = EwmaEstimator::new(0.4, 5, 1e-3, Duration::from_secs(120));
-
-    let rules = vec![
-        AlertRule {
-            kind: AlertKind::Spike,
-            min_level: AnomalyLevel::Suspicious,
-            min_confidence: 0.6,
-            cooldown: Duration::from_secs(120),
-            consecutive_threshold: 5,
-            resolve_consecutive_threshold: 3,
-            freezes_baseline: true,
-        },
-        AlertRule {
-            kind: AlertKind::Emergency,
-            min_level: AnomalyLevel::Severe,
-            min_confidence: 0.0,
-            cooldown: Duration::from_secs(60),
-            consecutive_threshold: 1,
-            resolve_consecutive_threshold: 1,
-            freezes_baseline: false,
-        },
-    ];
-    let mut alert_manager = AlertManager::new(rules);
-
-    let emergency_detector = EmergencyDetector::new(vec![EmergencyThreshold {
-        proto: ProtoIndex::Icmp,
-        max_pps: Some(3.0),
-        max_bps: None,
-    }]);
-    let mut baseline_warmed_up = false;
+    let mut anomaly_runner = AnomalyRunner::new(
+        config::default_baseline_estimator(),
+        config::default_emergency_detector(),
+        AlertManager::new(config::default_alert_rules()),
+    );
 
     loop {
         tokio::select! {
             _ = stats_poll_tick.tick() => {
-                let curr = read_snapshot(&proto_stats)?;
+                let curr = match read_snapshot(&proto_stats) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to read eBPF stats snapshot; skipping tick");
+                        continue;
+                    }
+                };
                 current_counters = Some(curr.clone());
 
                 for (idx, s) in curr.stats.iter().enumerate() {
@@ -150,24 +134,20 @@ async fn main() -> anyhow::Result<()> {
                 };
 
                 let mix_delta = diff_stats(&curr.stats, &prev.stats);
+                let mix = compute_mix(&mix_delta);
 
-                let total_packets: u64 = mix_delta.iter().map(|s| s.packets).sum();
-                let total_bytes: u64 = mix_delta.iter().map(|s| s.bytes).sum();
-
-                if total_packets > 0 {
-                    let icmp = mix_delta[ProtoIndex::Icmp as usize].packets;
-                    let tcp = mix_delta[ProtoIndex::Tcp as usize].packets;
-                    let udp = mix_delta[ProtoIndex::Udp as usize].packets;
-
+                if !mix.is_empty() {
+                    let get = |p: ProtoIndex| mix.iter().find(|(k, _)| *k == p).map(|(_, v)| *v).unwrap_or(0.0);
                     tracing::info!(
                         "mix(5s packets): ICMP={:.1}%, TCP={:.1}%, UDP={:.1}%",
-                        icmp as f64 * 100.0 / total_packets as f64,
-                        tcp as f64 * 100.0 / total_packets as f64,
-                        udp as f64 * 100.0 / total_packets as f64,
-
+                        get(ProtoIndex::Icmp),
+                        get(ProtoIndex::Tcp),
+                        get(ProtoIndex::Udp),
                     );
+                    metrics_handle.update_mix(&mix);
                 }
 
+                let total_bytes: u64 = mix_delta.iter().map(|s| s.bytes).sum();
                 if total_bytes > 0 {
                     let ipv6 = mix_delta[ProtoIndex::Ipv6 as usize].bytes;
                     tracing::debug!(
@@ -180,63 +160,7 @@ async fn main() -> anyhow::Result<()> {
                 prev_mix_counters = Some(curr.clone());
             }
             _ = anomaly_eval_tick.tick() => {
-                let Some(curr) = &current_counters else { continue };
-                let Some(prev) = &prev_anomaly_counters else {
-                    prev_anomaly_counters = Some(curr.clone());
-                    continue;
-                };
-
-                let rates = compute_rates(prev, curr);
-
-                let rate_snapshot = ProtoRateSnapshot {
-                    timestamp: curr.timestamp,
-                    rates,
-                };
-
-                let ewma_detector = EwmaDetector::new(&traffic_baseline);
-                let outcome = run_anomaly_pipeline(
-                    &rate_snapshot,
-                    &ewma_detector,
-                    &emergency_detector,
-                    &mut alert_manager,
-                );
-
-                if !alert_manager.is_baseline_frozen(curr.timestamp) {
-                    tracing::info!("updating traffic baseline");
-                    traffic_baseline.update(&rate_snapshot.rates);
-                }
-
-                if !baseline_warmed_up && !matches!(outcome, PipelineOutcome::WarmingUp) {
-                    baseline_warmed_up = true;
-                    tracing::info!("baseline ready");
-                }
-
-                match outcome {
-                    PipelineOutcome::WarmingUp => {
-                        tracing::info!("baseline warming up");
-                    }
-
-                    PipelineOutcome::NoSignals => {
-                        tracing::info!("no alert signals generated during anomaly evaluation");
-                    }
-
-                    PipelineOutcome::Events {
-                        events,
-                    } => {
-                        for event in events {
-                            tracing::warn!(
-                                proto = ?event.alert.proto,
-                                level = ?event.alert.level,
-                                kind = ?event.alert.kind,
-                                state = ?event.lifecycle,
-                                confidence = event.alert.confidence,
-                                "alert event"
-                            );
-                        }
-                    }
-                }
-
-                prev_anomaly_counters = Some(curr.clone());
+                anomaly_runner.tick(&current_counters, &metrics_handle);
             }
             _ = signal::ctrl_c() => {
                 tracing::info!("Exiting...");
