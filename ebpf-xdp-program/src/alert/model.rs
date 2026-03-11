@@ -10,6 +10,16 @@ pub enum AlertKind {
     Emergency,
 }
 
+impl AlertKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            AlertKind::Spike => "spike",
+            AlertKind::Drop => "drop",
+            AlertKind::Emergency => "emergency",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AlertSignal {
     pub proto: ProtoIndex,

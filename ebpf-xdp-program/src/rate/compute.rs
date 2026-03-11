@@ -46,6 +46,22 @@ pub fn compute_rates(
         .collect()
 }
 
+/// Returns per-protocol packet share as a percentage of total packets.
+/// Returns an empty vec if total packets is zero.
+pub fn compute_mix(delta: &[TrafficCounters]) -> Vec<(ProtoIndex, f64)> {
+    let total = delta.iter().map(|s| s.packets).sum::<u64>();
+    if total == 0 {
+        return vec![];
+    }
+    let total = total as f64;
+    (0..delta.len())
+        .filter_map(|idx| {
+            let proto = ProtoIndex::from_index(idx)?;
+            Some((proto, delta[idx].packets as f64 * 100.0 / total))
+        })
+        .collect()
+}
+
 fn read_current_stats(
     proto_stats: &PerCpuArray<&MapData, ProtoStats>,
 ) -> anyhow::Result<Vec<TrafficCounters>> {

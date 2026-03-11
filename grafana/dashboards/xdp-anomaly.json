@@ -1,0 +1,420 @@
+{
+  "title": "XDP Anomaly Detector",
+  "uid": "xdp-anomaly-v1",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "timezone": "browser",
+  "templating": {
+    "list": [
+      {
+        "name": "proto",
+        "label": "Protocol",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(xdp_traffic_pps, proto)",
+        "multi": true,
+        "includeAll": true,
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Traffic Rates",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Packets per Second",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "xdp_traffic_pps{proto=~\"$proto\"}",
+          "legendFormat": "{{proto}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list" } }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Bytes per Second",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "xdp_traffic_bps{proto=~\"$proto\"}",
+          "legendFormat": "{{proto}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list" } }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Traffic Mix % (5s window)",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "xdp_traffic_mix_pct{proto=~\"$proto\"}",
+          "legendFormat": "{{proto}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list" } }
+    },
+    {
+      "id": 5,
+      "type": "row",
+      "title": "Baseline",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+      "collapsed": false
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Baseline Readiness",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "xdp_baseline_ready{proto=~\"$proto\"}",
+          "legendFormat": "{{proto}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "Warming", "color": "orange" }, "1": { "text": "Ready", "color": "green" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "orange", "value": null }, { "color": "green", "value": 1 }] },
+          "color": { "mode": "thresholds" }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none", "textMode": "value_and_name" }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Baseline PPS Mean ± StdDev",
+      "gridPos": { "h": 8, "w": 10, "x": 4, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "xdp_baseline_pps_mean{proto=~\"$proto\"}",
+          "legendFormat": "mean {{proto}}",
+          "refId": "A"
+        },
+        {
+          "expr": "xdp_baseline_pps_stddev{proto=~\"$proto\"}",
+          "legendFormat": "stddev {{proto}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "pps", "color": { "mode": "palette-classic" } }
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list" } }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Baseline BPS Mean ± StdDev",
+      "gridPos": { "h": 8, "w": 10, "x": 14, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "xdp_baseline_bps_mean{proto=~\"$proto\"}",
+          "legendFormat": "mean {{proto}}",
+          "refId": "A"
+        },
+        {
+          "expr": "xdp_baseline_bps_stddev{proto=~\"$proto\"}",
+          "legendFormat": "stddev {{proto}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "Bps", "color": { "mode": "palette-classic" } }
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list" } }
+    },
+    {
+      "id": 9,
+      "type": "row",
+      "title": "Anomaly Detection",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "collapsed": false
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Z-Score PPS",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 19 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "xdp_anomaly_z_score_pps{proto=~\"$proto\"}",
+          "legendFormat": "{{proto}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "palette-classic" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 3 },
+              { "color": "red", "value": 6 }
+            ]
+          },
+          "custom": { "thresholdsStyle": { "mode": "line" } }
+        }
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list" } }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Z-Score BPS",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 19 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "xdp_anomaly_z_score_bps{proto=~\"$proto\"}",
+          "legendFormat": "{{proto}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "palette-classic" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 3 },
+              { "color": "red", "value": 6 }
+            ]
+          },
+          "custom": { "thresholdsStyle": { "mode": "line" } }
+        }
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list" } }
+    },
+    {
+      "id": 12,
+      "type": "state-timeline",
+      "title": "Anomaly Level",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 19 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "xdp_anomaly_level{proto=~\"$proto\"}",
+          "legendFormat": "{{proto}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": {
+              "0": { "text": "Normal",     "color": "green"  },
+              "1": { "text": "Suspicious", "color": "yellow" },
+              "2": { "text": "Severe",     "color": "red"    }
+            }}
+          ],
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 1    },
+              { "color": "red",    "value": 2    }
+            ]
+          }
+        }
+      },
+      "options": { "rowHeight": 0.9, "tooltip": { "mode": "single" }, "legend": { "displayMode": "list" } }
+    },
+    {
+      "id": 13,
+      "type": "row",
+      "title": "Alerts",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 },
+      "collapsed": false
+    },
+    {
+      "id": 14,
+      "type": "state-timeline",
+      "title": "Alert Phase",
+      "gridPos": { "h": 8, "w": 10, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "xdp_alert_phase{proto=~\"$proto\"}",
+          "legendFormat": "{{proto}}/{{kind}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": {
+              "0": { "text": "Inactive", "color": "grey"   },
+              "1": { "text": "Pending",  "color": "yellow" },
+              "2": { "text": "Firing",   "color": "red"    }
+            }}
+          ],
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "grey",   "value": null },
+              { "color": "yellow", "value": 1    },
+              { "color": "red",    "value": 2    }
+            ]
+          }
+        }
+      },
+      "options": { "rowHeight": 0.9, "tooltip": { "mode": "single" }, "legend": { "displayMode": "list" } }
+    },
+    {
+      "id": 15,
+      "type": "bargauge",
+      "title": "Consecutive Count",
+      "gridPos": { "h": 12, "w": 5, "x": 10, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "xdp_alert_consecutive_count{proto=~\"$proto\"}",
+          "legendFormat": "{{proto}}/{{kind}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 2    },
+              { "color": "red",    "value": 4    }
+            ]
+          }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "horizontal", "displayMode": "gradient" }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Alert Events (per 5m)",
+      "gridPos": { "h": 8, "w": 5, "x": 15, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "increase(xdp_alert_events_total{proto=~\"$proto\"}[5m])",
+          "legendFormat": "{{proto}}/{{kind}} {{lifecycle}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list" } }
+    },
+    {
+      "id": 18,
+      "type": "stat",
+      "title": "Total Alert Events",
+      "gridPos": { "h": 8, "w": 2, "x": 20, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (proto, kind, lifecycle) (xdp_alert_events_total{proto=~\"$proto\"})",
+          "legendFormat": "{{proto}}/{{kind}} {{lifecycle}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "none", "textMode": "value_and_name", "orientation": "vertical" }
+    },
+    {
+      "id": 17,
+      "type": "state-timeline",
+      "title": "Baseline Frozen",
+      "gridPos": { "h": 8, "w": 2, "x": 22, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "xdp_alert_baseline_frozen{proto=~\"$proto\"}",
+          "legendFormat": "{{proto}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": {
+              "0": { "text": "Active", "color": "green"  },
+              "1": { "text": "Frozen", "color": "orange" }
+            }}
+          ],
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }] }
+        }
+      },
+      "options": { "rowHeight": 0.9, "tooltip": { "mode": "single" }, "legend": { "displayMode": "list" } }
+    }
+  ]
+}

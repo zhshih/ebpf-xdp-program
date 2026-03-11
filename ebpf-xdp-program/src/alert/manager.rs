@@ -30,6 +30,14 @@ pub struct AlertEvent {
     pub lifecycle: AlertLifecycle,
 }
 
+/// Snapshot of a single alert slot for metrics export.
+pub struct AlertMetricsSnapshot {
+    pub proto: ProtoIndex,
+    pub kind: AlertKind,
+    pub phase_value: u8,
+    pub consecutive_count: u32,
+}
+
 pub struct AlertManager {
     rules: Vec<AlertRule>,
     states: HashMap<AlertKey, AlertState>,
@@ -52,13 +60,29 @@ impl AlertManager {
         self.advance_states(&active, now)
     }
 
-    pub fn is_baseline_frozen(&self, now: Instant) -> bool {
-        self.states.iter().any(|(key, state)| {
-            self.rules
-                .iter()
-                .find(|r| r.kind == key.kind)
-                .is_some_and(|rule| rule.freezes_baseline && state.is_hot(now, rule.cooldown))
-        })
+    pub fn metrics_snapshot(&self) -> Vec<AlertMetricsSnapshot> {
+        self.states
+            .iter()
+            .map(|(key, state)| AlertMetricsSnapshot {
+                proto: key.proto,
+                kind: key.kind,
+                phase_value: state.phase_value(),
+                consecutive_count: state.consecutive_count,
+            })
+            .collect()
+    }
+
+    pub fn frozen_protos(&self, now: Instant) -> HashSet<ProtoIndex> {
+        self.states
+            .iter()
+            .filter_map(|(key, state)| {
+                self.rules
+                    .iter()
+                    .find(|r| r.kind == key.kind)
+                    .filter(|rule| rule.freezes_baseline && state.is_hot(now, rule.cooldown))
+                    .map(|_| key.proto)
+            })
+            .collect()
     }
 
     fn collect_active(&self, signals: &[AlertSignal]) -> HashMap<AlertKey, AlertSignal> {
