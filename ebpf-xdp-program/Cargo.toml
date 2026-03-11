@@ -24,6 +24,8 @@ tokio = { workspace = true, features = [
     "signal",
 ] }
 clap = { workspace = true, features = ["derive"] }
+serde = { workspace = true }
+toml = { workspace = true }
 tracing-subscriber = "0.3.22"
 tracing = "0.1.44"
 network-types = "0.1.0"

@@ -1,0 +1,52 @@
+# ebpf-xdp-program configuration
+# All sections are optional — omitted fields use compiled-in defaults.
+#
+# Usage:
+#   cargo run --release -- --iface eth0 --config config.example.toml
+
+# ─── Baseline estimator ───────────────────────────────────────────────────────
+[baseline]
+# EWMA smoothing factor in (0, 1]. Higher = faster adaptation to new traffic.
+alpha = 0.4
+
+# Minimum number of samples before the baseline is considered ready.
+min_samples = 5
+
+# Minimum standard deviation required (avoids false positives on flat traffic).
+min_stddev = 0.001
+
+# Minimum elapsed seconds from startup before anomaly detection activates.
+min_elapsed_secs = 120
+
+# ─── Alert rules ─────────────────────────────────────────────────────────────
+# Each [[alert_rules]] entry configures one alert type.
+# kind:      "spike" | "drop" | "emergency"
+# min_level: "normal" | "suspicious" | "severe"
+
+[[alert_rules]]
+kind                          = "spike"
+min_level                     = "suspicious"
+min_confidence                = 0.6
+cooldown_secs                 = 120
+consecutive_threshold         = 5
+resolve_consecutive_threshold = 3
+freezes_baseline              = true
+
+[[alert_rules]]
+kind                          = "emergency"
+min_level                     = "severe"
+min_confidence                = 0.0
+cooldown_secs                 = 60
+consecutive_threshold         = 1
+resolve_consecutive_threshold = 1
+freezes_baseline              = false
+
+# ─── Emergency thresholds ─────────────────────────────────────────────────────
+# Each [[emergency_thresholds]] entry sets absolute rate limits for a protocol.
+# proto: "icmp" | "tcp" | "udp" | "ipv6" | "other"
+# Omit max_pps or max_bps to skip that dimension.
+
+[[emergency_thresholds]]
+proto   = "icmp"
+max_pps = 3.0
+# max_bps = 10000.0

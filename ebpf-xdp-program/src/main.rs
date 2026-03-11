@@ -34,6 +34,11 @@ struct Opt {
 
     #[clap(long, default_value = "9091")]
     metrics_port: u16,
+
+    /// Optional path to a TOML configuration file.
+    /// If omitted, compiled-in defaults are used.
+    #[clap(long, value_name = "FILE")]
+    config: Option<std::path::PathBuf>,
 }
 
 #[tokio::main]
@@ -80,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
             });
         }
     }
-    let Opt { iface, .. } = opt;
+    let Opt { iface, config: config_path, .. } = opt;
     let program: &mut Xdp = ebpf.program_mut("ebpf_xdp_program").unwrap().try_into()?;
     program.load()?;
     program.attach(&iface, XdpFlags::default())
@@ -97,10 +102,18 @@ async fn main() -> anyhow::Result<()> {
 
     let mut current_counters: Option<TrafficCountersSnapshot> = None;
     let mut prev_mix_counters: Option<TrafficCountersSnapshot> = None;
+    let (estimator, emergency_detector, alert_rules) = match &config_path {
+        Some(path) => config::load_config(path)?,
+        None => (
+            config::default_baseline_estimator(),
+            config::default_emergency_detector(),
+            config::default_alert_rules(),
+        ),
+    };
     let mut anomaly_runner = AnomalyRunner::new(
-        config::default_baseline_estimator(),
-        config::default_emergency_detector(),
-        AlertManager::new(config::default_alert_rules()),
+        estimator,
+        emergency_detector,
+        AlertManager::new(alert_rules),
     );
 
     loop {
