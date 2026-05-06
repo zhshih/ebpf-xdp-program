@@ -1,7 +1,6 @@
-use std::time::Instant;
+use ebpf_xdp_program_common::ProtoIndex;
 
 use crate::anomaly::AnomalyLevel;
-use ebpf_xdp_program_common::ProtoIndex;
 
 /// Classification of what kind of anomaly was detected.
 ///
@@ -58,7 +57,4 @@ pub struct Alert {
     pub kind: AlertKind,
     pub level: AnomalyLevel,
     pub confidence: f64,
-
-    #[allow(dead_code)]
-    pub timestamp: Instant,
 }

@@ -1,9 +1,10 @@
+use ebpf_xdp_program_common::ProtoIndex;
+
 use crate::{
     alert::{AlertKind, AlertSignal},
     anomaly::{AnomalyDetector, AnomalyLevel, DetectResult},
     rate::ProtoRateSnapshot,
 };
-use ebpf_xdp_program_common::ProtoIndex;
 
 /// Per-protocol absolute rate thresholds for emergency detection.
 ///
@@ -85,10 +86,9 @@ impl AnomalyDetector for EmergencyDetector {
 mod tests {
     use super::*;
     use crate::rate::{ProtoRate, ProtoRateSnapshot};
-    use std::time::Instant;
 
     fn snapshot(rates: Vec<ProtoRate>) -> ProtoRateSnapshot {
-        ProtoRateSnapshot { timestamp: Instant::now(), rates }
+        ProtoRateSnapshot { rates }
     }
 
     fn rate(proto: ProtoIndex, pps: f64, bps: f64) -> ProtoRate {
@@ -121,9 +121,8 @@ mod tests {
             max_bps: None,
         }]);
         let result = det.detect(&snapshot(vec![rate(ProtoIndex::Tcp, 1001.0, 0.0)]));
-        let signals = match result {
-            DetectResult::Signals(s) => s,
-            _ => panic!("expected Signals"),
+        let DetectResult::Signals(signals) = result else {
+            panic!("expected DetectResult::Signals");
         };
         assert_eq!(signals.len(), 1);
         assert_eq!(signals[0].proto, ProtoIndex::Tcp);
@@ -139,9 +138,8 @@ mod tests {
             max_bps: Some(100_000.0),
         }]);
         let result = det.detect(&snapshot(vec![rate(ProtoIndex::Udp, 0.0, 100_001.0)]));
-        let signals = match result {
-            DetectResult::Signals(s) => s,
-            _ => panic!("expected Signals"),
+        let DetectResult::Signals(signals) = result else {
+            panic!("expected DetectResult::Signals");
         };
         assert_eq!(signals.len(), 1);
         assert_eq!(signals[0].proto, ProtoIndex::Udp);
@@ -156,10 +154,12 @@ mod tests {
             max_bps: None,
         }]);
         let result = det.detect(&snapshot(vec![rate(ProtoIndex::Icmp, 1000.0, 0.0)]));
-        let signals = match result {
-            DetectResult::Signals(s) => s,
-            _ => panic!("expected Signals"),
+        let DetectResult::Signals(signals) = result else {
+            panic!("expected DetectResult::Signals");
         };
-        assert!((signals[0].confidence - 1.0).abs() < 1e-9, "confidence should be 1.0 at 2× threshold");
+        assert!(
+            (signals[0].confidence - 1.0).abs() < 1e-9,
+            "confidence should be 1.0 at 2× threshold"
+        );
     }
 }

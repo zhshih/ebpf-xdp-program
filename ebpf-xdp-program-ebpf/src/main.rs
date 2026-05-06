@@ -1,13 +1,14 @@
 #![no_std]
 #![no_main]
 
+use core::{mem, ptr};
+
 use aya_ebpf::{
     bindings::xdp_action,
     macros::{map, xdp},
     maps::PerCpuArray,
     programs::XdpContext,
 };
-use core::{mem, ptr};
 use ebpf_xdp_program_common::{ProtoIndex, ProtoStats};
 use network_types::{
     eth::{EthHdr, EtherType},

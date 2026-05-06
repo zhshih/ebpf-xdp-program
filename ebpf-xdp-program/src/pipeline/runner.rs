@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::{
     alert::{AlertEvent, AlertManager, AlertSignal},
     anomaly::{AnomalyDetector, DetectResult, EmergencyDetector, EwmaDetector},
@@ -26,7 +28,13 @@ impl AnomalyRunner {
         emergency_detector: EmergencyDetector,
         alert_manager: AlertManager,
     ) -> Self {
-        Self { prev_counters: None, baseline, emergency_detector, alert_manager, warmed_up: false }
+        Self {
+            prev_counters: None,
+            baseline,
+            emergency_detector,
+            alert_manager,
+            warmed_up: false,
+        }
     }
 
     pub fn tick(&mut self, current: &Option<TrafficCountersSnapshot>, metrics: &MetricsHandle) {
@@ -40,7 +48,7 @@ impl AnomalyRunner {
         };
 
         let rates = compute_rates(&prev, curr);
-        let rate_snapshot = ProtoRateSnapshot { timestamp: curr.timestamp, rates };
+        let rate_snapshot = ProtoRateSnapshot { rates };
 
         let ewma_detector = EwmaDetector::new(&self.baseline);
         let outcome = run_anomaly_pipeline(
@@ -51,7 +59,9 @@ impl AnomalyRunner {
         );
 
         let frozen = self.alert_manager.frozen_protos(curr.timestamp);
-        let unfrozen: Vec<_> = rate_snapshot.rates.iter()
+        let unfrozen: Vec<_> = rate_snapshot
+            .rates
+            .iter()
             .filter(|r| !frozen.contains(&r.proto))
             .cloned()
             .collect();
@@ -100,15 +110,18 @@ impl AnomalyRunner {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::alert::{AlertKind, AlertRule, AlertSignal};
-    use crate::anomaly::{AnomalyDetector, AnomalyLevel, DetectResult};
-    use crate::rate::{ProtoRate, ProtoRateSnapshot};
-    use ebpf_xdp_program_common::ProtoIndex;
     use std::time::Instant;
+
+    use ebpf_xdp_program_common::ProtoIndex;
+
+    use super::*;
+    use crate::{
+        alert::{AlertKind, AlertRule, AlertSignal},
+        anomaly::{AnomalyDetector, AnomalyLevel, DetectResult},
+        rate::{ProtoRate, ProtoRateSnapshot},
+    };
 
     struct WarmingDetector;
     impl AnomalyDetector for WarmingDetector {
@@ -126,8 +139,11 @@ mod tests {
 
     fn make_snapshot() -> ProtoRateSnapshot {
         ProtoRateSnapshot {
-            timestamp: Instant::now(),
-            rates: vec![ProtoRate { proto: ProtoIndex::Tcp, pps: 100.0, bps: 10_000.0 }],
+            rates: vec![ProtoRate {
+                proto: ProtoIndex::Tcp,
+                pps: 100.0,
+                bps: 10_000.0,
+            }],
         }
     }
 
@@ -143,11 +159,13 @@ mod tests {
         }
     }
 
-    use crate::config::{default_alert_rules, default_baseline_estimator, default_emergency_detector};
-    use crate::metrics::MetricsHandle;
-    use crate::rate::{TrafficCountersSnapshot};
-    use crate::rate::model::TrafficCounters;
     use std::time::Duration;
+
+    use crate::{
+        config::{default_alert_rules, default_baseline_estimator, default_emergency_detector},
+        metrics::MetricsHandle,
+        rate::{TrafficCountersSnapshot, model::TrafficCounters},
+    };
 
     fn make_runner() -> AnomalyRunner {
         AnomalyRunner::new(
@@ -159,9 +177,15 @@ mod tests {
 
     fn make_counter_snapshot(t: Instant, pkts: u64, bytes: u64) -> TrafficCountersSnapshot {
         let stats = (0..ProtoIndex::COUNT as usize)
-            .map(|_| TrafficCounters { packets: pkts, bytes: bytes })
+            .map(|_| TrafficCounters {
+                packets: pkts,
+                bytes: bytes,
+            })
             .collect();
-        TrafficCountersSnapshot { timestamp: t, stats }
+        TrafficCountersSnapshot {
+            timestamp: t,
+            stats,
+        }
     }
 
     #[test]
@@ -226,9 +250,11 @@ mod tests {
     /// computation → `AlertManager` FSM → `AlertEvent::Fired`. No mocked detectors.
     #[test]
     fn end_to_end_spike_fires_after_baseline_warms_up() {
-        use crate::alert::AlertLifecycle;
-        use crate::anomaly::{EmergencyDetector, EwmaDetector};
-        use crate::baseline::{BaselineState, EwmaEstimator};
+        use crate::{
+            alert::AlertLifecycle,
+            anomaly::{EmergencyDetector, EwmaDetector},
+            baseline::{BaselineState, EwmaEstimator},
+        };
 
         // No time gate so the test doesn't have to sleep.
         let mut estimator = EwmaEstimator::new(0.4, 10, 1e-3, Duration::ZERO);
@@ -236,10 +262,17 @@ mod tests {
         // Alternating 100/200 pps builds stddev above min_stddev quickly.
         for i in 0..20 {
             let pps = if i % 2 == 0 { 100.0_f64 } else { 200.0 };
-            estimator.update(&[ProtoRate { proto: ProtoIndex::Tcp, pps, bps: pps * 100.0 }]);
+            estimator.update(&[ProtoRate {
+                proto: ProtoIndex::Tcp,
+                pps,
+                bps: pps * 100.0,
+            }]);
         }
         assert!(
-            matches!(estimator.snapshot(ProtoIndex::Tcp), BaselineState::Ready { .. }),
+            matches!(
+                estimator.snapshot(ProtoIndex::Tcp),
+                BaselineState::Ready { .. }
+            ),
             "baseline must be ready before the end-to-end test can proceed"
         );
 
@@ -257,8 +290,11 @@ mod tests {
 
         // 100 000 pps is >> 6σ above a ~150 pps baseline → Severe spike.
         let spike = ProtoRateSnapshot {
-            timestamp: Instant::now(),
-            rates: vec![ProtoRate { proto: ProtoIndex::Tcp, pps: 100_000.0, bps: 10_000_000.0 }],
+            rates: vec![ProtoRate {
+                proto: ProtoIndex::Tcp,
+                pps: 100_000.0,
+                bps: 10_000_000.0,
+            }],
         };
 
         let outcome = run_anomaly_pipeline(&spike, &ewma_detector, &emergency, &mut alert_manager);
@@ -294,7 +330,7 @@ fn run_anomaly_pipeline(
         tracing::info!("generated {} total signals", all_signals.len());
     }
 
-    let events = alert_manager.evaluate(&all_signals, snapshot.timestamp);
+    let events = alert_manager.evaluate(&all_signals, Instant::now());
 
     if events.is_empty() {
         if any_warming {

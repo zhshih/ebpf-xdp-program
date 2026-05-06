@@ -68,8 +68,9 @@ impl ProtoIndex {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bytemuck::Zeroable;
+
+    use super::*;
 
     #[test]
     fn proto_index_from_index_valid() {

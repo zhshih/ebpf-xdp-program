@@ -13,15 +13,17 @@ use aya::{
 };
 use clap::Parser;
 #[rustfmt::skip]
-use log::{debug, warn};
+use log::warn;
+use std::time::Duration;
+
+use ebpf_xdp_program_common::{ProtoIndex, ProtoStats};
+use tokio::signal;
+
 use crate::{
     alert::AlertManager,
     pipeline::AnomalyRunner,
     rate::{TrafficCountersSnapshot, compute_mix, diff_stats, read_snapshot},
 };
-use ebpf_xdp_program_common::{ProtoIndex, ProtoStats};
-use std::time::Duration;
-use tokio::signal;
 
 const STATS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MIX_AGG_INTERVAL: Duration = Duration::from_secs(5);
@@ -29,7 +31,7 @@ const ANOMALY_EVAL_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Parser)]
 struct Opt {
-    #[clap(short, long, default_value = "wlo1")]
+    #[clap(short, long, env = "XDP_IFACE")]
     iface: String,
 
     #[clap(long, default_value = "9091")]
@@ -57,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let ret = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &rlim) };
     if ret != 0 {
-        debug!("remove limit on locked memory failed, ret is: {ret}");
+        warn!("remove limit on locked memory failed, ret is: {ret}");
     }
 
     // This will include your eBPF object file as raw bytes at compile-time and load it at
@@ -78,15 +80,22 @@ async fn main() -> anyhow::Result<()> {
                 tokio::io::unix::AsyncFd::with_interest(logger, tokio::io::Interest::READABLE)?;
             tokio::task::spawn(async move {
                 loop {
-                    let mut guard = logger.readable_mut().await.unwrap();
+                    let mut guard = logger.readable_mut().await.expect("eBPF logger fd error");
                     guard.get_inner_mut().flush();
                     guard.clear_ready();
                 }
             });
         }
     }
-    let Opt { iface, config: config_path, .. } = opt;
-    let program: &mut Xdp = ebpf.program_mut("ebpf_xdp_program").unwrap().try_into()?;
+    let Opt {
+        iface,
+        config: config_path,
+        ..
+    } = opt;
+    let program: &mut Xdp = ebpf
+        .program_mut("ebpf_xdp_program")
+        .context("eBPF program 'ebpf_xdp_program' not found in object file")?
+        .try_into()?;
     program.load()?;
     program.attach(&iface, XdpFlags::default())
         .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;

@@ -109,7 +109,11 @@ mod tests {
         for _ in 0..100 {
             e.update(50.0);
         }
-        assert!((e.mean - 50.0).abs() < 0.01, "mean should converge to 50.0, got {}", e.mean);
+        assert!(
+            (e.mean - 50.0).abs() < 0.01,
+            "mean should converge to 50.0, got {}",
+            e.mean
+        );
     }
 
     #[test]

@@ -1,0 +1,29 @@
+{
+    "rust-analyzer.linkedProjects": [
+        "ebpf-xdp-program/Cargo.toml",
+        "ebpf-xdp-program-common/Cargo.toml",
+        {
+            "sysroot_src": null,
+            "crates": [
+                {
+                    "display_name": "ebpf-xdp-program-ebpf",
+                    "root_module": "ebpf-xdp-program-ebpf/src/main.rs",
+                    "edition": "2024",
+                    "target": "bpfel-unknown-none",
+                    "cfg": [],
+                    "deps": [
+                        { "crate": 0, "name": "ebpf_xdp_program_common" }
+                    ]
+                },
+                {
+                    "display_name": "ebpf-xdp-program-common",
+                    "root_module": "ebpf-xdp-program-common/src/lib.rs",
+                    "edition": "2024",
+                    "target": "bpfel-unknown-none",
+                    "cfg": [],
+                    "deps": []
+                }
+            ]
+        }
+    ]
+}

@@ -10,6 +10,7 @@ default-members = ["ebpf-xdp-program", "ebpf-xdp-program-common"]
 [workspace.package]
 license = "MIT OR Apache-2.0"
 edition = "2024"
+repository = "https://github.com/zhshih/ebpf-xdp-program"
 
 [workspace.dependencies]
 aya = { git = "https://github.com/aya-rs/aya", rev = "a9945b0957343b46657df7f8d905a5eedff7c43c", default-features = false }

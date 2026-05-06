@@ -1,5 +1,6 @@
-use ebpf_xdp_program_common::ProtoIndex;
 use std::time::Instant;
+
+use ebpf_xdp_program_common::ProtoIndex;
 
 /// Raw cumulative packet and byte counters for one protocol bucket.
 ///
@@ -30,10 +31,8 @@ pub struct ProtoRate {
     pub bps: f64,
 }
 
-/// A timestamped collection of per-protocol rates, passed to anomaly detectors.
-#[allow(dead_code)]
+/// A collection of per-protocol rates, passed to anomaly detectors.
 #[derive(Debug, Clone)]
 pub struct ProtoRateSnapshot {
-    pub timestamp: Instant,
     pub rates: Vec<ProtoRate>,
 }

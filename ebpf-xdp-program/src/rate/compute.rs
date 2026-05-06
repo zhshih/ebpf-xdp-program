@@ -1,6 +1,6 @@
-use aya::maps::{MapData, PerCpuArray};
 use std::time::Instant;
 
+use aya::maps::{MapData, PerCpuArray};
 use ebpf_xdp_program_common::{ProtoIndex, ProtoStats};
 
 use super::model::{ProtoRate, TrafficCounters, TrafficCountersSnapshot};
@@ -89,8 +89,9 @@ fn read_current_stats(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::Duration;
+
+    use super::*;
 
     fn counters(packets: u64, bytes: u64) -> TrafficCounters {
         TrafficCounters { packets, bytes }
@@ -124,7 +125,10 @@ mod tests {
         curr_stats[ProtoIndex::Tcp as usize] = counters(1000, 100_000);
 
         let t0 = Instant::now();
-        let prev = TrafficCountersSnapshot { timestamp: t0, stats: prev_stats };
+        let prev = TrafficCountersSnapshot {
+            timestamp: t0,
+            stats: prev_stats,
+        };
         let curr = TrafficCountersSnapshot {
             timestamp: t0 + Duration::from_secs(2),
             stats: curr_stats,
@@ -133,7 +137,11 @@ mod tests {
         let rates = compute_rates(&prev, &curr);
         let tcp = rates.iter().find(|r| r.proto == ProtoIndex::Tcp).unwrap();
 
-        assert!((tcp.pps - 500.0).abs() < 1.0, "expected 500 pps, got {}", tcp.pps);
+        assert!(
+            (tcp.pps - 500.0).abs() < 1.0,
+            "expected 500 pps, got {}",
+            tcp.pps
+        );
         assert!(
             (tcp.bps - 50_000.0).abs() < 1.0,
             "expected 50000 bps, got {}",
@@ -154,8 +162,15 @@ mod tests {
         delta[ProtoIndex::Tcp as usize] = counters(500, 0);
         let mix = compute_mix(&delta);
         // compute_mix returns all protocols (including 0%), so check TCP's share specifically
-        let tcp = mix.iter().find(|(p, _)| *p == ProtoIndex::Tcp).expect("TCP should be in mix");
-        assert!((tcp.1 - 100.0).abs() < 0.001, "TCP should have 100% share, got {}", tcp.1);
+        let tcp = mix
+            .iter()
+            .find(|(p, _)| *p == ProtoIndex::Tcp)
+            .expect("TCP should be in mix");
+        assert!(
+            (tcp.1 - 100.0).abs() < 0.001,
+            "TCP should have 100% share, got {}",
+            tcp.1
+        );
     }
 
     #[test]
@@ -166,6 +181,10 @@ mod tests {
         delta[ProtoIndex::Icmp as usize] = counters(100, 0);
         let mix = compute_mix(&delta);
         let sum: f64 = mix.iter().map(|(_, pct)| pct).sum();
-        assert!((sum - 100.0).abs() < 0.001, "mix should sum to 100, got {}", sum);
+        assert!(
+            (sum - 100.0).abs() < 0.001,
+            "mix should sum to 100, got {}",
+            sum
+        );
     }
 }

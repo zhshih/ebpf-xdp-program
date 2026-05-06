@@ -1,5 +1,9 @@
-use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
+
+use ebpf_xdp_program_common::ProtoIndex;
 
 use crate::{
     alert::{
@@ -8,7 +12,6 @@ use crate::{
     },
     anomaly::AnomalyLevel,
 };
-use ebpf_xdp_program_common::ProtoIndex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct AlertKey {
@@ -199,11 +202,10 @@ impl AlertManager {
                     rule.cooldown,
                     rule.consecutive_threshold,
                     rule.resolve_consecutive_threshold,
-                )
-                {
+                ) {
                     match lifecycle {
                         AlertLifecycle::Fired => {
-                            let s = signal.unwrap();
+                            let s = signal.expect("signal present when alert fired");
                             tracing::info!(
                                 proto = ?s.proto,
                                 kind = ?s.kind,
@@ -215,7 +217,6 @@ impl AlertManager {
                                     kind: s.kind,
                                     level: s.level,
                                     confidence: s.confidence,
-                                    timestamp: now,
                                 },
                                 lifecycle,
                             });
@@ -233,7 +234,6 @@ impl AlertManager {
                                     kind: key.kind,
                                     level: rule.min_level,
                                     confidence: 0.0,
-                                    timestamp: now,
                                 },
                                 lifecycle,
                             });
@@ -253,7 +253,12 @@ mod tests {
     use crate::anomaly::AnomalyLevel;
 
     fn spike_signal(proto: ProtoIndex, level: AnomalyLevel, confidence: f64) -> AlertSignal {
-        AlertSignal { proto, level, kind: AlertKind::Spike, confidence }
+        AlertSignal {
+            proto,
+            level,
+            kind: AlertKind::Spike,
+            confidence,
+        }
     }
 
     fn spike_rule(min_level: AnomalyLevel, min_confidence: f64, threshold: u32) -> AlertRule {
@@ -355,7 +360,10 @@ mod tests {
             confidence: 1.0,
         };
         let events = mgr.evaluate(&[drop_signal], Instant::now());
-        assert!(events.is_empty(), "Drop signal should be ignored by Spike-only rule");
+        assert!(
+            events.is_empty(),
+            "Drop signal should be ignored by Spike-only rule"
+        );
     }
 
     #[test]
@@ -367,6 +375,9 @@ mod tests {
         mgr.evaluate(&[signal], now);
 
         let frozen = mgr.frozen_protos(now);
-        assert!(frozen.contains(&ProtoIndex::Tcp), "TCP should be frozen after firing");
+        assert!(
+            frozen.contains(&ProtoIndex::Tcp),
+            "TCP should be frozen after firing"
+        );
     }
 }

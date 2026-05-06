@@ -1,7 +1,11 @@
-use crate::{baseline::Ewma, rate::ProtoRate};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
+
 use ebpf_xdp_program_common::ProtoIndex;
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+
+use crate::{baseline::Ewma, rate::ProtoRate};
 
 /// Whether a protocol's baseline is ready for anomaly detection.
 ///
@@ -56,7 +60,8 @@ impl EwmaEstimator {
         let mut bps = HashMap::new();
 
         for idx in 0..ProtoIndex::COUNT {
-            let proto = ProtoIndex::from_index(idx as usize).unwrap();
+            let proto = ProtoIndex::from_index(idx as usize)
+                .expect("idx is within 0..ProtoIndex::COUNT");
             pps.insert(proto, Ewma::new(alpha));
             bps.insert(proto, Ewma::new(alpha));
         }
@@ -75,8 +80,14 @@ impl EwmaEstimator {
     ///
     /// Returns `Warming` if any readiness condition is unmet; `Ready` otherwise.
     pub fn snapshot(&self, proto: ProtoIndex) -> BaselineState {
-        let pps = self.pps_ewma.get(&proto).unwrap();
-        let bps = self.bps_ewma.get(&proto).unwrap();
+        let pps = self
+            .pps_ewma
+            .get(&proto)
+            .expect("all ProtoIndex values inserted in new()");
+        let bps = self
+            .bps_ewma
+            .get(&proto)
+            .expect("all ProtoIndex values inserted in new()");
 
         let samples = pps.samples.min(bps.samples);
         let elapsed = self.start_time.elapsed();
@@ -177,7 +188,11 @@ mod tests {
     fn estimator_warming_below_min_samples() {
         let mut est = make_estimator(5, 1e-3);
         for i in 0..4 {
-            est.update(&[make_rate(ProtoIndex::Tcp, i as f64 * 10.0, i as f64 * 1000.0)]);
+            est.update(&[make_rate(
+                ProtoIndex::Tcp,
+                i as f64 * 10.0,
+                i as f64 * 1000.0,
+            )]);
         }
         assert!(
             matches!(est.snapshot(ProtoIndex::Tcp), BaselineState::Warming),
@@ -228,7 +243,10 @@ mod tests {
         // Call snapshot() via the Baseline trait object to exercise the trait impl (lines 148-149).
         let est = make_estimator(5, 1e-3);
         let b: &dyn Baseline = &est;
-        assert!(matches!(b.snapshot(ProtoIndex::Tcp), BaselineState::Warming));
+        assert!(matches!(
+            b.snapshot(ProtoIndex::Tcp),
+            BaselineState::Warming
+        ));
     }
 
     #[test]

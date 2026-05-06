@@ -34,7 +34,7 @@ jobs:
         run: cargo +stable install bpf-linker
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: cargo +nightly fmt --all -- --check
 
       - name: Check
         run: cargo check
@@ -43,4 +43,4 @@ jobs:
         run: cargo clippy --package ebpf-xdp-program --package ebpf-xdp-program-common
 
       - name: Test
-        run: cargo test
+        run: CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=env cargo test

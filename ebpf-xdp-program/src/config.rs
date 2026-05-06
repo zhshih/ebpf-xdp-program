@@ -224,15 +224,30 @@ mod tests {
 
     #[test]
     fn parse_anomaly_level_valid() {
-        assert!(matches!(parse_anomaly_level("normal"), Ok(AnomalyLevel::Normal)));
-        assert!(matches!(parse_anomaly_level("suspicious"), Ok(AnomalyLevel::Suspicious)));
-        assert!(matches!(parse_anomaly_level("severe"), Ok(AnomalyLevel::Severe)));
+        assert!(matches!(
+            parse_anomaly_level("normal"),
+            Ok(AnomalyLevel::Normal)
+        ));
+        assert!(matches!(
+            parse_anomaly_level("suspicious"),
+            Ok(AnomalyLevel::Suspicious)
+        ));
+        assert!(matches!(
+            parse_anomaly_level("severe"),
+            Ok(AnomalyLevel::Severe)
+        ));
     }
 
     #[test]
     fn parse_anomaly_level_case_insensitive() {
-        assert!(matches!(parse_anomaly_level("NORMAL"), Ok(AnomalyLevel::Normal)));
-        assert!(matches!(parse_anomaly_level("Suspicious"), Ok(AnomalyLevel::Suspicious)));
+        assert!(matches!(
+            parse_anomaly_level("NORMAL"),
+            Ok(AnomalyLevel::Normal)
+        ));
+        assert!(matches!(
+            parse_anomaly_level("Suspicious"),
+            Ok(AnomalyLevel::Suspicious)
+        ));
     }
 
     #[test]
@@ -247,7 +262,10 @@ mod tests {
     fn parse_alert_kind_valid() {
         assert!(matches!(parse_alert_kind("spike"), Ok(AlertKind::Spike)));
         assert!(matches!(parse_alert_kind("drop"), Ok(AlertKind::Drop)));
-        assert!(matches!(parse_alert_kind("emergency"), Ok(AlertKind::Emergency)));
+        assert!(matches!(
+            parse_alert_kind("emergency"),
+            Ok(AlertKind::Emergency)
+        ));
     }
 
     #[test]
@@ -280,7 +298,10 @@ mod tests {
         use crate::baseline::BaselineState;
         let est = build_estimator(None);
         // No samples fed — must still be in Warming state.
-        assert!(matches!(est.snapshot(ProtoIndex::Tcp), BaselineState::Warming));
+        assert!(matches!(
+            est.snapshot(ProtoIndex::Tcp),
+            BaselineState::Warming
+        ));
     }
 
     // ── build_alert_rules ────────────────────────────────────────────────────
@@ -361,7 +382,10 @@ mod tests {
     fn load_config_empty_toml_returns_defaults() {
         let path = std::env::temp_dir().join("test_config_empty.toml");
         std::fs::write(&path, "").unwrap();
-        assert!(load_config(&path).is_ok(), "empty TOML should fall back to defaults");
+        assert!(
+            load_config(&path).is_ok(),
+            "empty TOML should fall back to defaults"
+        );
     }
 
     #[test]

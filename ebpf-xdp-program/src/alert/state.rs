@@ -282,13 +282,19 @@ mod tests {
         let mut s = AlertState::new();
         let now = Instant::now();
         // Fire (threshold=1), then resolve (resolve_threshold=1)
-        s.advance(true, now, Duration::ZERO, 1, 1);   // → Firing, last_fired=Some(now)
-        s.advance(false, now, Duration::ZERO, 1, 1);  // → Inactive, last_fired preserved
+        s.advance(true, now, Duration::ZERO, 1, 1); // → Firing, last_fired=Some(now)
+        s.advance(false, now, Duration::ZERO, 1, 1); // → Inactive, last_fired preserved
         // is_hot() with large cooldown should return true
-        assert!(s.is_hot(now, Duration::from_secs(120)), "should be hot within cooldown window");
+        assert!(
+            s.is_hot(now, Duration::from_secs(120)),
+            "should be hot within cooldown window"
+        );
         // is_hot() after cooldown expires should return false
         let after_cooldown = now + Duration::from_secs(121);
-        assert!(!s.is_hot(after_cooldown, Duration::from_secs(120)), "should not be hot after cooldown");
+        assert!(
+            !s.is_hot(after_cooldown, Duration::from_secs(120)),
+            "should not be hot after cooldown"
+        );
     }
 
     #[test]

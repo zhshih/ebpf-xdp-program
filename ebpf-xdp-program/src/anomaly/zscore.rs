@@ -6,23 +6,6 @@ use crate::baseline::ProtoBaseline;
 
 const EPSILON: f64 = 1e-9;
 
-#[allow(dead_code)]
-const Z_CLIP: f64 = 10.0;
-
-/// Computes a z-score clipped to `[-10, 10]`.
-///
-/// Returns `None` when `stddev <= EPSILON` to signal that the distribution is
-/// too narrow to produce meaningful scores (e.g., no data yet).
-#[allow(dead_code)]
-pub fn robust_z_score_clipped(value: f64, mean: f64, stddev: f64) -> Option<f64> {
-    if stddev <= EPSILON {
-        return None;
-    }
-
-    let z = z_score_raw(value, mean, stddev);
-    Some(z.clamp(-Z_CLIP, Z_CLIP))
-}
-
 /// Computes `(z_pps, z_bps)` for an observed rate against a protocol baseline.
 ///
 /// Returns `(0.0, 0.0)` when either stddev is too small — a safe default
@@ -54,7 +37,21 @@ fn z_score(value: f64, mean: f64, stddev: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::baseline::{estimator::BaselineStats, ProtoBaseline};
+    use crate::baseline::{ProtoBaseline, estimator::BaselineStats};
+
+    const Z_CLIP: f64 = 10.0;
+
+    /// Computes a z-score clipped to `[-Z_CLIP, Z_CLIP]`.
+    ///
+    /// Returns `None` when `stddev <= EPSILON` to signal that the distribution is
+    /// too narrow to produce meaningful scores (e.g., no data yet).
+    fn robust_z_score_clipped(value: f64, mean: f64, stddev: f64) -> Option<f64> {
+        if stddev <= EPSILON {
+            return None;
+        }
+        let z = (value - mean) / stddev;
+        Some(z.clamp(-Z_CLIP, Z_CLIP))
+    }
 
     fn make_baseline(
         pps_mean: f64,
@@ -63,8 +60,14 @@ mod tests {
         bps_stddev: f64,
     ) -> ProtoBaseline {
         ProtoBaseline {
-            pps: BaselineStats { mean: pps_mean, stddev: pps_stddev },
-            bps: BaselineStats { mean: bps_mean, stddev: bps_stddev },
+            pps: BaselineStats {
+                mean: pps_mean,
+                stddev: pps_stddev,
+            },
+            bps: BaselineStats {
+                mean: bps_mean,
+                stddev: bps_stddev,
+            },
         }
     }
 
@@ -81,8 +84,16 @@ mod tests {
     fn z_score_exact_mean_is_zero() {
         let baseline = make_baseline(100.0, 10.0, 10_000.0, 1_000.0);
         let (z_pps, z_bps) = compute_proto_z_scores(&baseline, 100.0, 10_000.0);
-        assert!((z_pps).abs() < 1e-9, "value == mean should give z=0, got {}", z_pps);
-        assert!((z_bps).abs() < 1e-9, "value == mean should give z=0, got {}", z_bps);
+        assert!(
+            (z_pps).abs() < 1e-9,
+            "value == mean should give z=0, got {}",
+            z_pps
+        );
+        assert!(
+            (z_bps).abs() < 1e-9,
+            "value == mean should give z=0, got {}",
+            z_bps
+        );
     }
 
     #[test]
@@ -96,7 +107,11 @@ mod tests {
     fn z_score_below_mean() {
         let baseline = make_baseline(100.0, 10.0, 0.0, 1.0);
         let (z_pps, _) = compute_proto_z_scores(&baseline, 70.0, 0.0);
-        assert!((z_pps - (-3.0)).abs() < 1e-9, "expected z=-3.0, got {}", z_pps);
+        assert!(
+            (z_pps - (-3.0)).abs() < 1e-9,
+            "expected z=-3.0, got {}",
+            z_pps
+        );
     }
 
     #[test]
@@ -109,6 +124,10 @@ mod tests {
     fn robust_z_clipped_clamps_at_10() {
         // z = (10000 - 0) / 1 = 10000, should be clamped to 10
         let result = robust_z_score_clipped(10_000.0, 0.0, 1.0).unwrap();
-        assert!((result - 10.0).abs() < 1e-9, "should be clamped to 10, got {}", result);
+        assert!(
+            (result - 10.0).abs() < 1e-9,
+            "should be clamped to 10, got {}",
+            result
+        );
     }
 }
