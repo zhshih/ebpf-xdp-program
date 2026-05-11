@@ -1,17 +1,18 @@
 #![no_std]
 #![no_main]
 
+use core::{mem, ptr};
+
 use aya_ebpf::{
     bindings::xdp_action,
     macros::{map, xdp},
     maps::PerCpuArray,
     programs::XdpContext,
 };
-use core::{mem, ptr};
 use ebpf_xdp_program_common::{ProtoIndex, ProtoStats};
 use network_types::{
     eth::{EthHdr, EtherType},
-    ip::{IpProto, Ipv4Hdr},
+    ip::{IpProto, Ipv4Hdr, Ipv6Hdr},
 };
 
 #[map(name = "PROTO_STATS")]
@@ -37,12 +38,15 @@ fn ptr_at<T>(ctx: &aya_ebpf::programs::XdpContext, offset: usize) -> Option<*con
 
 fn parse_l4_protocol(ctx: &XdpContext) -> Option<IpProto> {
     let eth = parse_ethhdr(ctx)?;
-    if eth != EtherType::Ipv4.into() {
-        return None;
+    if eth == EtherType::Ipv4.into() {
+        parse_ipv4hdr(ctx)
+    } else if eth == EtherType::Ipv6.into() {
+        // Bounds-check the IPv6 header; count the frame in the IPv6 bucket.
+        ptr_at::<Ipv6Hdr>(ctx, mem::size_of::<EthHdr>())?;
+        Some(IpProto::Ipv6)
+    } else {
+        None
     }
-
-    let ip = parse_ipv4hdr(ctx)?;
-    Some(ip)
 }
 
 fn parse_ethhdr(ctx: &XdpContext) -> Option<u16> {
