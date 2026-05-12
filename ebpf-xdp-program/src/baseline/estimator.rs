@@ -60,8 +60,8 @@ impl EwmaEstimator {
         let mut bps = HashMap::new();
 
         for idx in 0..ProtoIndex::COUNT {
-            let proto = ProtoIndex::from_index(idx as usize)
-                .expect("idx is within 0..ProtoIndex::COUNT");
+            let proto =
+                ProtoIndex::from_index(idx as usize).expect("idx is within 0..ProtoIndex::COUNT");
             pps.insert(proto, Ewma::new(alpha));
             bps.insert(proto, Ewma::new(alpha));
         }
