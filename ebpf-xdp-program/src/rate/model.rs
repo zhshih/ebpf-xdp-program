@@ -30,9 +30,3 @@ pub struct ProtoRate {
     /// Bytes per second observed in the last interval.
     pub bps: f64,
 }
-
-/// A collection of per-protocol rates, passed to anomaly detectors.
-#[derive(Debug, Clone)]
-pub struct ProtoRateSnapshot {
-    pub rates: Vec<ProtoRate>,
-}

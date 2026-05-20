@@ -3,7 +3,7 @@ use ebpf_xdp_program_common::ProtoIndex;
 use crate::{
     alert::{AlertKind, AlertSignal},
     anomaly::{AnomalyDetector, AnomalyLevel, DetectResult},
-    rate::ProtoRateSnapshot,
+    rate::ProtoRate,
 };
 
 /// Per-protocol absolute rate thresholds for emergency detection.
@@ -35,10 +35,10 @@ impl EmergencyDetector {
 }
 
 impl AnomalyDetector for EmergencyDetector {
-    fn detect(&self, snapshot: &ProtoRateSnapshot) -> DetectResult {
+    fn detect(&self, rates: &[ProtoRate]) -> DetectResult {
         let mut signals = Vec::new();
 
-        for rate in &snapshot.rates {
+        for rate in rates {
             let Some(t) = self.thresholds.iter().find(|t| t.proto == rate.proto) else {
                 continue;
             };
@@ -85,11 +85,7 @@ impl AnomalyDetector for EmergencyDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rate::{ProtoRate, ProtoRateSnapshot};
-
-    fn snapshot(rates: Vec<ProtoRate>) -> ProtoRateSnapshot {
-        ProtoRateSnapshot { rates }
-    }
+    use crate::rate::ProtoRate;
 
     fn rate(proto: ProtoIndex, pps: f64, bps: f64) -> ProtoRate {
         ProtoRate { proto, pps, bps }
@@ -98,7 +94,7 @@ mod tests {
     #[test]
     fn emergency_no_threshold_no_signal() {
         let det = EmergencyDetector::new(vec![]);
-        let result = det.detect(&snapshot(vec![rate(ProtoIndex::Tcp, 1_000_000.0, 1e12)]));
+        let result = det.detect(&[rate(ProtoIndex::Tcp, 1_000_000.0, 1e12)]);
         assert!(matches!(result, DetectResult::Signals(ref s) if s.is_empty()));
     }
 
@@ -109,7 +105,7 @@ mod tests {
             max_pps: Some(1000.0),
             max_bps: Some(100_000.0),
         }]);
-        let result = det.detect(&snapshot(vec![rate(ProtoIndex::Tcp, 999.0, 99_999.0)]));
+        let result = det.detect(&[rate(ProtoIndex::Tcp, 999.0, 99_999.0)]);
         assert!(matches!(result, DetectResult::Signals(ref s) if s.is_empty()));
     }
 
@@ -120,7 +116,7 @@ mod tests {
             max_pps: Some(1000.0),
             max_bps: None,
         }]);
-        let result = det.detect(&snapshot(vec![rate(ProtoIndex::Tcp, 1001.0, 0.0)]));
+        let result = det.detect(&[rate(ProtoIndex::Tcp, 1001.0, 0.0)]);
         let DetectResult::Signals(signals) = result else {
             panic!("expected DetectResult::Signals");
         };
@@ -137,7 +133,7 @@ mod tests {
             max_pps: None,
             max_bps: Some(100_000.0),
         }]);
-        let result = det.detect(&snapshot(vec![rate(ProtoIndex::Udp, 0.0, 100_001.0)]));
+        let result = det.detect(&[rate(ProtoIndex::Udp, 0.0, 100_001.0)]);
         let DetectResult::Signals(signals) = result else {
             panic!("expected DetectResult::Signals");
         };
@@ -153,7 +149,7 @@ mod tests {
             max_pps: Some(500.0),
             max_bps: None,
         }]);
-        let result = det.detect(&snapshot(vec![rate(ProtoIndex::Icmp, 1000.0, 0.0)]));
+        let result = det.detect(&[rate(ProtoIndex::Icmp, 1000.0, 0.0)]);
         let DetectResult::Signals(signals) = result else {
             panic!("expected DetectResult::Signals");
         };

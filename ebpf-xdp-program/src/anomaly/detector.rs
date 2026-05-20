@@ -1,4 +1,4 @@
-use crate::{alert::AlertSignal, rate::ProtoRateSnapshot};
+use crate::{alert::AlertSignal, rate::ProtoRate};
 
 /// Outcome of a single anomaly detection pass.
 ///
@@ -14,7 +14,7 @@ pub enum DetectResult {
 /// Implementors examine a rate snapshot and return signals for any protocols
 /// whose traffic deviates from the expected pattern.
 pub trait AnomalyDetector {
-    fn detect(&self, snapshot: &ProtoRateSnapshot) -> DetectResult;
+    fn detect(&self, rates: &[ProtoRate]) -> DetectResult;
 }
 
 /// Severity classification for a detected anomaly.
