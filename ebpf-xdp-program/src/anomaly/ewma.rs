@@ -3,7 +3,7 @@ use crate::{
     alert::{AlertKind, AlertSignal},
     anomaly::detector::{AnomalyDetector, AnomalyLevel, DetectResult},
     baseline::{Baseline, BaselineState},
-    rate::ProtoRateSnapshot,
+    rate::ProtoRate,
 };
 
 /// EWMA-backed anomaly detector that computes per-protocol z-scores against a live baseline.
@@ -22,11 +22,11 @@ impl<'a, B: Baseline> EwmaDetector<'a, B> {
 }
 
 impl<'a, B: Baseline> AnomalyDetector for EwmaDetector<'a, B> {
-    fn detect(&self, snapshot: &ProtoRateSnapshot) -> DetectResult {
+    fn detect(&self, rates: &[ProtoRate]) -> DetectResult {
         let mut signals = Vec::new();
         let mut any_ready = false;
 
-        for rate in &snapshot.rates {
+        for rate in rates {
             let baseline_state = self.baseline.snapshot(rate.proto);
 
             let (anomaly_level, z_pps, z_bps) = match baseline_state {
@@ -123,7 +123,7 @@ mod tests {
             Baseline, BaselineState,
             estimator::{BaselineStats, ProtoBaseline},
         },
-        rate::{ProtoRate, ProtoRateSnapshot},
+        rate::ProtoRate,
     };
 
     // ── Test doubles ─────────────────────────────────────────────────────────
@@ -162,8 +162,8 @@ mod tests {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    fn snapshot(rates: Vec<ProtoRate>) -> ProtoRateSnapshot {
-        ProtoRateSnapshot { rates }
+    fn rates(rates: Vec<ProtoRate>) -> Vec<ProtoRate> {
+        rates
     }
 
     fn rate(proto: ProtoIndex, pps: f64, bps: f64) -> ProtoRate {
@@ -176,7 +176,7 @@ mod tests {
     fn warming_up_returns_warming_up() {
         let baseline = WarmingBaseline;
         let det = EwmaDetector::new(&baseline);
-        let result = det.detect(&snapshot(vec![rate(ProtoIndex::Tcp, 100.0, 10_000.0)]));
+        let result = det.detect(&rates(vec![rate(ProtoIndex::Tcp, 100.0, 10_000.0)]));
         assert!(matches!(result, DetectResult::WarmingUp));
     }
 
@@ -190,7 +190,7 @@ mod tests {
             stddev_bps: 1e-10,
         };
         let det = EwmaDetector::new(&baseline);
-        let result = det.detect(&snapshot(vec![rate(ProtoIndex::Tcp, 60.0, 0.0)]));
+        let result = det.detect(&rates(vec![rate(ProtoIndex::Tcp, 60.0, 0.0)]));
         let DetectResult::Signals(signals) = result else {
             panic!("expected DetectResult::Signals");
         };
@@ -216,7 +216,7 @@ mod tests {
             stddev_bps: 1e-10,
         };
         let det = EwmaDetector::new(&baseline);
-        let result = det.detect(&snapshot(vec![rate(ProtoIndex::Icmp, 0.0, 0.0)]));
+        let result = det.detect(&rates(vec![rate(ProtoIndex::Icmp, 0.0, 0.0)]));
         let DetectResult::Signals(signals) = result else {
             panic!("expected DetectResult::Signals");
         };
@@ -241,7 +241,7 @@ mod tests {
             stddev_bps: 1e-10,
         };
         let det = EwmaDetector::new(&baseline);
-        let result = det.detect(&snapshot(vec![rate(ProtoIndex::Udp, 150.0, 0.0)]));
+        let result = det.detect(&rates(vec![rate(ProtoIndex::Udp, 150.0, 0.0)]));
         let DetectResult::Signals(signals) = result else {
             panic!("expected DetectResult::Signals");
         };
@@ -261,7 +261,7 @@ mod tests {
             stddev_bps: 5.0,
         };
         let det = EwmaDetector::new(&baseline);
-        let result = det.detect(&snapshot(vec![rate(ProtoIndex::Tcp, 130.0, 200.0)]));
+        let result = det.detect(&rates(vec![rate(ProtoIndex::Tcp, 130.0, 200.0)]));
         let DetectResult::Signals(signals) = result else {
             panic!("expected DetectResult::Signals");
         };
@@ -286,7 +286,7 @@ mod tests {
             stddev_bps: 10.0,
         };
         let det = EwmaDetector::new(&baseline);
-        let result = det.detect(&snapshot(vec![rate(ProtoIndex::Tcp, 101.0, 101.0)]));
+        let result = det.detect(&rates(vec![rate(ProtoIndex::Tcp, 101.0, 101.0)]));
         assert!(matches!(result, DetectResult::Signals(ref s) if s.is_empty()));
     }
 }

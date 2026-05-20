@@ -5,7 +5,7 @@ use crate::{
     anomaly::{AnomalyDetector, DetectResult, EmergencyDetector, EwmaDetector},
     baseline::EwmaEstimator,
     metrics::MetricsHandle,
-    rate::{ProtoRateSnapshot, TrafficCountersSnapshot, compute_rates},
+    rate::{ProtoRate, TrafficCountersSnapshot, compute_rates},
 };
 
 enum PipelineOutcome {
@@ -48,19 +48,17 @@ impl AnomalyRunner {
         };
 
         let rates = compute_rates(&prev, curr);
-        let rate_snapshot = ProtoRateSnapshot { rates };
 
         let ewma_detector = EwmaDetector::new(&self.baseline);
         let outcome = run_anomaly_pipeline(
-            &rate_snapshot,
+            &rates,
             &ewma_detector,
             &self.emergency_detector,
             &mut self.alert_manager,
         );
 
         let frozen = self.alert_manager.frozen_protos(curr.timestamp);
-        let unfrozen: Vec<_> = rate_snapshot
-            .rates
+        let unfrozen: Vec<_> = rates
             .iter()
             .filter(|r| !frozen.contains(&r.proto))
             .cloned()
@@ -98,15 +96,49 @@ impl AnomalyRunner {
             );
         }
 
-        metrics.update_rates(&rate_snapshot.rates);
+        metrics.update_rates(&rates);
         metrics.update_baseline(&self.baseline);
-        metrics.update_anomaly(&rate_snapshot.rates, &self.baseline);
+        metrics.update_anomaly(&rates, &self.baseline);
         metrics.update_alerts(&self.alert_manager.metrics_snapshot(), &frozen);
         for event in &events {
             metrics.record_alert_event(event.alert.proto, event.alert.kind, event.lifecycle);
         }
 
         self.prev_counters = Some(curr.clone());
+    }
+}
+
+fn run_anomaly_pipeline(
+    rates: &[ProtoRate],
+    ewma: &dyn AnomalyDetector,
+    emergency: &dyn AnomalyDetector,
+    alert_manager: &mut AlertManager,
+) -> PipelineOutcome {
+    let results = [ewma.detect(rates), emergency.detect(rates)];
+
+    let any_warming = results.iter().any(|r| matches!(r, DetectResult::WarmingUp));
+    let all_signals: Vec<AlertSignal> = results
+        .into_iter()
+        .flat_map(|r| match r {
+            DetectResult::WarmingUp => vec![],
+            DetectResult::Signals(s) => s,
+        })
+        .collect();
+
+    if !all_signals.is_empty() {
+        tracing::info!("generated {} total signals", all_signals.len());
+    }
+
+    let events = alert_manager.evaluate(&all_signals, Instant::now());
+
+    if events.is_empty() {
+        if any_warming {
+            PipelineOutcome::WarmingUp
+        } else {
+            PipelineOutcome::NoSignals
+        }
+    } else {
+        PipelineOutcome::Events { events }
     }
 }
 
@@ -120,31 +152,29 @@ mod tests {
     use crate::{
         alert::{AlertKind, AlertRule, AlertSignal},
         anomaly::{AnomalyDetector, AnomalyLevel, DetectResult},
-        rate::{ProtoRate, ProtoRateSnapshot},
+        rate::ProtoRate,
     };
 
     struct WarmingDetector;
     impl AnomalyDetector for WarmingDetector {
-        fn detect(&self, _: &ProtoRateSnapshot) -> DetectResult {
+        fn detect(&self, _: &[ProtoRate]) -> DetectResult {
             DetectResult::WarmingUp
         }
     }
 
     struct SignalDetector(Vec<AlertSignal>);
     impl AnomalyDetector for SignalDetector {
-        fn detect(&self, _: &ProtoRateSnapshot) -> DetectResult {
+        fn detect(&self, _: &[ProtoRate]) -> DetectResult {
             DetectResult::Signals(self.0.clone())
         }
     }
 
-    fn make_snapshot() -> ProtoRateSnapshot {
-        ProtoRateSnapshot {
-            rates: vec![ProtoRate {
-                proto: ProtoIndex::Tcp,
-                pps: 100.0,
-                bps: 10_000.0,
-            }],
-        }
+    fn make_rates() -> Vec<ProtoRate> {
+        vec![ProtoRate {
+            proto: ProtoIndex::Tcp,
+            pps: 100.0,
+            bps: 10_000.0,
+        }]
     }
 
     fn immediate_spike_rule() -> AlertRule {
@@ -179,7 +209,7 @@ mod tests {
         let stats = (0..ProtoIndex::COUNT as usize)
             .map(|_| TrafficCounters {
                 packets: pkts,
-                bytes: bytes,
+                bytes,
             })
             .collect();
         TrafficCountersSnapshot {
@@ -217,7 +247,7 @@ mod tests {
     fn pipeline_warming_up() {
         let det = WarmingDetector;
         let mut mgr = AlertManager::new(vec![immediate_spike_rule()]);
-        let outcome = run_anomaly_pipeline(&make_snapshot(), &det, &det, &mut mgr);
+        let outcome = run_anomaly_pipeline(&make_rates(), &det, &det, &mut mgr);
         assert!(matches!(outcome, PipelineOutcome::WarmingUp));
     }
 
@@ -225,7 +255,7 @@ mod tests {
     fn pipeline_no_signals_when_ready() {
         let det = SignalDetector(vec![]);
         let mut mgr = AlertManager::new(vec![immediate_spike_rule()]);
-        let outcome = run_anomaly_pipeline(&make_snapshot(), &det, &det, &mut mgr);
+        let outcome = run_anomaly_pipeline(&make_rates(), &det, &det, &mut mgr);
         assert!(matches!(outcome, PipelineOutcome::NoSignals));
     }
 
@@ -240,7 +270,7 @@ mod tests {
         let det = SignalDetector(vec![signal]);
         let empty = SignalDetector(vec![]);
         let mut mgr = AlertManager::new(vec![immediate_spike_rule()]);
-        let outcome = run_anomaly_pipeline(&make_snapshot(), &det, &empty, &mut mgr);
+        let outcome = run_anomaly_pipeline(&make_rates(), &det, &empty, &mut mgr);
         assert!(matches!(outcome, PipelineOutcome::Events { .. }));
     }
 
@@ -289,13 +319,11 @@ mod tests {
         }]);
 
         // 100 000 pps is >> 6σ above a ~150 pps baseline → Severe spike.
-        let spike = ProtoRateSnapshot {
-            rates: vec![ProtoRate {
-                proto: ProtoIndex::Tcp,
-                pps: 100_000.0,
-                bps: 10_000_000.0,
-            }],
-        };
+        let spike = vec![ProtoRate {
+            proto: ProtoIndex::Tcp,
+            pps: 100_000.0,
+            bps: 10_000_000.0,
+        }];
 
         let outcome = run_anomaly_pipeline(&spike, &ewma_detector, &emergency, &mut alert_manager);
 
@@ -306,39 +334,5 @@ mod tests {
         assert!(matches!(events[0].lifecycle, AlertLifecycle::Fired));
         assert_eq!(events[0].alert.proto, ProtoIndex::Tcp);
         assert!(matches!(events[0].alert.level, AnomalyLevel::Severe));
-    }
-}
-
-fn run_anomaly_pipeline(
-    snapshot: &ProtoRateSnapshot,
-    ewma: &dyn AnomalyDetector,
-    emergency: &dyn AnomalyDetector,
-    alert_manager: &mut AlertManager,
-) -> PipelineOutcome {
-    let results = [ewma.detect(snapshot), emergency.detect(snapshot)];
-
-    let any_warming = results.iter().any(|r| matches!(r, DetectResult::WarmingUp));
-    let all_signals: Vec<AlertSignal> = results
-        .into_iter()
-        .flat_map(|r| match r {
-            DetectResult::WarmingUp => vec![],
-            DetectResult::Signals(s) => s,
-        })
-        .collect();
-
-    if !all_signals.is_empty() {
-        tracing::info!("generated {} total signals", all_signals.len());
-    }
-
-    let events = alert_manager.evaluate(&all_signals, Instant::now());
-
-    if events.is_empty() {
-        if any_warming {
-            PipelineOutcome::WarmingUp
-        } else {
-            PipelineOutcome::NoSignals
-        }
-    } else {
-        PipelineOutcome::Events { events }
     }
 }
