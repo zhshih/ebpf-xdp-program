@@ -108,10 +108,10 @@ impl AnomalyRunner {
     }
 }
 
-fn run_anomaly_pipeline(
+fn run_anomaly_pipeline<E: AnomalyDetector, Em: AnomalyDetector>(
     rates: &[ProtoRate],
-    ewma: &dyn AnomalyDetector,
-    emergency: &dyn AnomalyDetector,
+    ewma: &E,
+    emergency: &Em,
     alert_manager: &mut AlertManager,
 ) -> PipelineOutcome {
     let results = [ewma.detect(rates), emergency.detect(rates)];
