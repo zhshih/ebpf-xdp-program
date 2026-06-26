@@ -1,4 +1,5 @@
-use super::zscore::compute_proto_z_scores;
+use ewma_detector::compute_proto_z_scores;
+
 use crate::{
     alert::{AlertKind, AlertSignal},
     anomaly::detector::{AnomalyDetector, AnomalyLevel, DetectResult},
@@ -119,10 +120,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        baseline::{
-            Baseline, BaselineState,
-            estimator::{BaselineStats, ProtoBaseline},
-        },
+        baseline::{Baseline, BaselineState, BaselineStats, ProtoBaseline},
         rate::ProtoRate,
     };
 
