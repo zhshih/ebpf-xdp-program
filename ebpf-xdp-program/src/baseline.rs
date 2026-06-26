@@ -5,7 +5,6 @@
 //! it has accumulated enough samples, sufficient variance, and enough wall-clock time.
 //! Until then, anomaly detection is suppressed for that protocol.
 pub mod estimator;
-pub mod ewma;
 
 pub use estimator::{Baseline, BaselineState, EwmaEstimator, ProtoBaseline};
-pub use ewma::Ewma;
+pub use ewma_detector::Ewma;
