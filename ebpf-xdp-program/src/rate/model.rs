@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use ebpf_xdp_program_common::ProtoIndex;
+pub use ewma_detector::ProtoRate;
 
 /// Raw cumulative packet and byte counters for one protocol bucket.
 ///
@@ -19,14 +19,4 @@ pub struct TrafficCounters {
 pub struct TrafficCountersSnapshot {
     pub timestamp: Instant,
     pub stats: Vec<TrafficCounters>,
-}
-
-/// Per-protocol traffic rates derived from two consecutive counter snapshots.
-#[derive(Debug, Clone)]
-pub struct ProtoRate {
-    pub proto: ProtoIndex,
-    /// Packets per second observed in the last interval.
-    pub pps: f64,
-    /// Bytes per second observed in the last interval.
-    pub bps: f64,
 }
