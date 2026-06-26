@@ -38,6 +38,11 @@ impl AnomalyRunner {
     }
 
     pub fn tick(&mut self, current: &Option<TrafficCountersSnapshot>, metrics: &MetricsHandle) {
+        // Advances the baseline's wall-clock gate unconditionally: this is called once
+        // per real ANOMALY_EVAL_INTERVAL tick regardless of data availability, so time
+        // must keep advancing even when there's nothing to process yet.
+        self.baseline.advance();
+
         let Some(curr) = current else { return };
         let prev = match &self.prev_counters {
             Some(p) => p.clone(),
@@ -286,8 +291,8 @@ mod tests {
             baseline::{BaselineState, EwmaEstimator},
         };
 
-        // No time gate so the test doesn't have to sleep.
-        let mut estimator = EwmaEstimator::new(0.4, 10, 1e-3, Duration::ZERO);
+        // No time gate so the test doesn't have to advance ticks.
+        let mut estimator = EwmaEstimator::new(0.4, 10, 1e-3, 0);
 
         // Alternating 100/200 pps builds stddev above min_stddev quickly.
         for i in 0..20 {
