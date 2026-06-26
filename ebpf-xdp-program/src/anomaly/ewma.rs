@@ -2,7 +2,7 @@ use ewma_detector::compute_proto_z_scores;
 
 use crate::{
     alert::{AlertKind, AlertSignal},
-    anomaly::detector::{AnomalyDetector, AnomalyLevel, DetectResult},
+    anomaly::{AnomalyDetector, AnomalyLevel, DetectResult},
     baseline::{Baseline, BaselineState},
     rate::ProtoRate,
 };
