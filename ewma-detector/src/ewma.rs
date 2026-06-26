@@ -3,7 +3,7 @@
 /// Tracks mean, variance (EWMA of squared deviations), and MAD (mean absolute deviation)
 /// simultaneously. Updates are Huber-clipped (k=3) to resist outlier contamination of
 /// the baseline, which is critical for accurate anomaly detection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Ewma {
     pub alpha: f64,
     pub mean: f64,
@@ -59,7 +59,7 @@ impl Ewma {
 
     /// Standard deviation derived from EWMA variance. Floor is `EPSILON` to avoid division by zero.
     pub fn stddev(&self) -> f64 {
-        self.variance.sqrt().max(Self::EPSILON)
+        libm::sqrt(self.variance).max(Self::EPSILON)
     }
 
     /// Robust standard deviation: `max(1.4826 * MAD, 0.25 * σ, EPSILON)`.
@@ -68,7 +68,7 @@ impl Ewma {
     /// Used internally to scale the Huber clipping window.
     pub fn robust_stddev(&self) -> f64 {
         let mad_sigma = 1.4826 * self.mad;
-        let var_sigma = self.variance.sqrt();
+        let var_sigma = libm::sqrt(self.variance);
         mad_sigma.max(var_sigma * 0.25).max(Self::EPSILON)
     }
 }

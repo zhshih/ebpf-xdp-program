@@ -2,7 +2,7 @@
 // These functions are pure math utilities.
 // They must NOT be used directly for anomaly decisions.
 // Use Ewma::robust_z_score instead.
-use crate::baseline::ProtoBaseline;
+use crate::estimator::ProtoBaseline;
 
 const EPSILON: f64 = 1e-9;
 
@@ -37,7 +37,7 @@ fn z_score(value: f64, mean: f64, stddev: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::baseline::{ProtoBaseline, estimator::BaselineStats};
+    use crate::estimator::BaselineStats;
 
     const Z_CLIP: f64 = 10.0;
 

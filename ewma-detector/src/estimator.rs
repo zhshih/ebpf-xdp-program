@@ -1,21 +1,8 @@
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
-
 use ebpf_xdp_program_common::ProtoIndex;
 
-use crate::{baseline::Ewma, rate::ProtoRate};
+use crate::{ewma::Ewma, rate::ProtoRate};
 
-/// Whether a protocol's baseline is ready for anomaly detection.
-///
-/// `Warming` means not enough data has been collected yet; anomaly detection
-/// is skipped for that protocol. `Ready` carries the current baseline estimates.
-#[derive(Debug)]
-pub enum BaselineState {
-    Ready { baseline: ProtoBaseline },
-    Warming,
-}
+const PROTO_COUNT: usize = ProtoIndex::COUNT as usize;
 
 /// Mean and standard deviation for a single metric dimension (pps or bps).
 #[derive(Debug, Clone)]
@@ -32,20 +19,30 @@ pub struct ProtoBaseline {
     pub bps: BaselineStats,
 }
 
+/// Whether a protocol's baseline is ready for anomaly detection.
+///
+/// `Warming` means not enough data has been collected yet; anomaly detection
+/// is skipped for that protocol. `Ready` carries the current baseline estimates.
+#[derive(Debug)]
+pub enum BaselineState {
+    Ready { baseline: ProtoBaseline },
+    Warming,
+}
+
 /// Manages one [`Ewma`] per (protocol, dimension) pair and gatekeeps readiness.
 ///
 /// A protocol transitions from `Warming` to `Ready` only when all three conditions hold:
 /// - At least `min_samples` observations have been fed via [`update`](Self::update)
 /// - Both pps and bps stddev exceed `min_stddev` (filters out flat/idle protocols)
-/// - At least `min_elapsed` wall-clock time has passed since construction
+/// - At least `min_elapsed_ticks` calls to [`advance`](Self::advance) have happened since construction
 #[derive(Debug)]
 pub struct EwmaEstimator {
-    pps_ewma: HashMap<ProtoIndex, Ewma>,
-    bps_ewma: HashMap<ProtoIndex, Ewma>,
+    pps_ewma: [Ewma; PROTO_COUNT],
+    bps_ewma: [Ewma; PROTO_COUNT],
     min_samples: u64,
     min_stddev: f64,
-    min_elapsed: Duration,
-    start_time: Instant,
+    min_elapsed_ticks: u64,
+    elapsed_ticks: u64,
 }
 
 impl EwmaEstimator {
@@ -54,43 +51,34 @@ impl EwmaEstimator {
     /// - `alpha`: EWMA smoothing factor (0, 1]
     /// - `min_samples`: minimum observations before readiness
     /// - `min_stddev`: minimum standard deviation required (filters constant-rate protocols)
-    /// - `min_elapsed`: minimum wall-clock warmup duration
-    pub fn new(alpha: f64, min_samples: u64, min_stddev: f64, min_elapsed: Duration) -> Self {
-        let mut pps = HashMap::new();
-        let mut bps = HashMap::new();
-
-        for idx in 0..ProtoIndex::COUNT {
-            let proto =
-                ProtoIndex::from_index(idx as usize).expect("idx is within 0..ProtoIndex::COUNT");
-            pps.insert(proto, Ewma::new(alpha));
-            bps.insert(proto, Ewma::new(alpha));
-        }
-
+    /// - `min_elapsed_ticks`: minimum number of [`advance`](Self::advance) calls before readiness
+    pub fn new(alpha: f64, min_samples: u64, min_stddev: f64, min_elapsed_ticks: u64) -> Self {
         Self {
-            pps_ewma: pps,
-            bps_ewma: bps,
+            pps_ewma: [Ewma::new(alpha); PROTO_COUNT],
+            bps_ewma: [Ewma::new(alpha); PROTO_COUNT],
             min_samples,
             min_stddev,
-            min_elapsed,
-            start_time: Instant::now(),
+            min_elapsed_ticks,
+            elapsed_ticks: 0,
         }
+    }
+
+    /// Advances the wall-clock gate by one tick.
+    ///
+    /// Call once per pipeline tick, independent of [`update`](Self::update), so the
+    /// gate keeps advancing even when every protocol is momentarily frozen.
+    pub fn advance(&mut self) {
+        self.elapsed_ticks += 1;
     }
 
     /// Returns the current baseline state for `proto`.
     ///
     /// Returns `Warming` if any readiness condition is unmet; `Ready` otherwise.
     pub fn snapshot(&self, proto: ProtoIndex) -> BaselineState {
-        let pps = self
-            .pps_ewma
-            .get(&proto)
-            .expect("all ProtoIndex values inserted in new()");
-        let bps = self
-            .bps_ewma
-            .get(&proto)
-            .expect("all ProtoIndex values inserted in new()");
+        let pps = &self.pps_ewma[proto as usize];
+        let bps = &self.bps_ewma[proto as usize];
 
         let samples = pps.samples.min(bps.samples);
-        let elapsed = self.start_time.elapsed();
 
         let baseline = ProtoBaseline {
             pps: BaselineStats {
@@ -106,31 +94,11 @@ impl EwmaEstimator {
         if samples < self.min_samples
             || baseline.pps.stddev < self.min_stddev
             || baseline.bps.stddev < self.min_stddev
-            || elapsed < self.min_elapsed
+            || self.elapsed_ticks < self.min_elapsed_ticks
         {
-            tracing::trace!(
-                proto = ?proto,
-                samples = samples,
-                min_samples = self.min_samples,
-                pps_stddev = baseline.pps.stddev,
-                bps_stddev = baseline.bps.stddev,
-                min_stddev = self.min_stddev,
-                elapsed_secs = elapsed.as_secs(),
-                min_elapsed_secs = self.min_elapsed.as_secs(),
-                "baseline warming"
-            );
             return BaselineState::Warming;
         }
 
-        tracing::debug!(
-            proto = ?proto,
-            pps_mean = baseline.pps.mean,
-            pps_stddev = baseline.pps.stddev,
-            bps_mean = baseline.bps.mean,
-            bps_stddev = baseline.bps.stddev,
-            samples = samples,
-            "baseline ready"
-        );
         BaselineState::Ready { baseline }
     }
 
@@ -140,12 +108,8 @@ impl EwmaEstimator {
     /// in `observed_rates` are silently skipped (their EWMAs are not updated).
     pub fn update(&mut self, observed_rates: &[ProtoRate]) {
         for rate in observed_rates {
-            if let Some(ewma_pps) = self.pps_ewma.get_mut(&rate.proto) {
-                ewma_pps.update(rate.pps);
-            }
-            if let Some(ewma_bps) = self.bps_ewma.get_mut(&rate.proto) {
-                ewma_bps.update(rate.bps);
-            }
+            self.pps_ewma[rate.proto as usize].update(rate.pps);
+            self.bps_ewma[rate.proto as usize].update(rate.bps);
         }
     }
 }
@@ -164,11 +128,10 @@ impl Baseline for EwmaEstimator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rate::ProtoRate;
 
     fn make_estimator(min_samples: u64, min_stddev: f64) -> EwmaEstimator {
-        // min_elapsed = ZERO so time gate never blocks tests
-        EwmaEstimator::new(0.4, min_samples, min_stddev, Duration::ZERO)
+        // min_elapsed_ticks = 0 so the time gate never blocks tests
+        EwmaEstimator::new(0.4, min_samples, min_stddev, 0)
     }
 
     fn make_rate(proto: ProtoIndex, pps: f64, bps: f64) -> ProtoRate {
@@ -232,15 +195,15 @@ mod tests {
     fn estimator_update_feeds_both_dimensions() {
         let mut est = make_estimator(1, 0.0);
         est.update(&[make_rate(ProtoIndex::Udp, 50.0, 5000.0)]);
-        let pps_samples = est.pps_ewma[&ProtoIndex::Udp].samples;
-        let bps_samples = est.bps_ewma[&ProtoIndex::Udp].samples;
+        let pps_samples = est.pps_ewma[ProtoIndex::Udp as usize].samples;
+        let bps_samples = est.bps_ewma[ProtoIndex::Udp as usize].samples;
         assert_eq!(pps_samples, 1, "pps EWMA should have 1 sample");
         assert_eq!(bps_samples, 1, "bps EWMA should have 1 sample");
     }
 
     #[test]
     fn baseline_trait_dispatch() {
-        // Call snapshot() via the Baseline trait object to exercise the trait impl (lines 148-149).
+        // Call snapshot() via the Baseline trait object to exercise the trait impl.
         let est = make_estimator(5, 1e-3);
         let b: &dyn Baseline = &est;
         assert!(matches!(
@@ -257,5 +220,18 @@ mod tests {
             let proto = ProtoIndex::from_index(i).unwrap();
             let _ = est.snapshot(proto);
         }
+    }
+
+    #[test]
+    fn advance_alone_satisfies_elapsed_gate() {
+        // Time gate should be satisfiable purely via advance(), independent of update().
+        let mut est = EwmaEstimator::new(0.4, 0, 0.0, 3);
+        for _ in 0..3 {
+            est.advance();
+        }
+        assert!(
+            matches!(est.snapshot(ProtoIndex::Tcp), BaselineState::Ready { .. }),
+            "elapsed_ticks should reach min_elapsed_ticks via advance() alone"
+        );
     }
 }

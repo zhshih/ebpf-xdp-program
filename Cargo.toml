@@ -4,8 +4,9 @@ members = [
     "ebpf-xdp-program",
     "ebpf-xdp-program-common",
     "ebpf-xdp-program-ebpf",
+    "ewma-detector",
 ]
-default-members = ["ebpf-xdp-program", "ebpf-xdp-program-common"]
+default-members = ["ebpf-xdp-program", "ebpf-xdp-program-common", "ewma-detector"]
 
 [workspace.package]
 license = "MIT OR Apache-2.0"
@@ -27,6 +28,7 @@ cargo_metadata = { version = "0.23.0", default-features = false }
 clap = { version = "4.5.20", default-features = false, features = ["std"] }
 env_logger = { version = "0.11.5", default-features = false }
 libc = { version = "0.2.159", default-features = false }
+libm = { version = "0.2", default-features = false }
 log = { version = "0.4.22", default-features = false }
 tokio = { version = "1.40.0", features = [
     "rt-multi-thread",

@@ -110,7 +110,9 @@ fn build_estimator(baseline: Option<BaselineConfig>) -> EwmaEstimator {
         b.alpha.unwrap_or(0.4),
         b.min_samples.unwrap_or(5),
         b.min_stddev.unwrap_or(1e-3),
-        Duration::from_secs(b.min_elapsed_secs.unwrap_or(120)),
+        b.min_elapsed_secs
+            .unwrap_or(120)
+            .div_ceil(crate::ANOMALY_EVAL_INTERVAL.as_secs()),
     )
 }
 
@@ -182,7 +184,12 @@ pub fn load_config(
 }
 
 pub fn default_baseline_estimator() -> EwmaEstimator {
-    EwmaEstimator::new(0.4, 5, 1e-3, Duration::from_secs(120))
+    EwmaEstimator::new(
+        0.4,
+        5,
+        1e-3,
+        120u64.div_ceil(crate::ANOMALY_EVAL_INTERVAL.as_secs()),
+    )
 }
 
 pub fn default_alert_rules() -> Vec<AlertRule> {

@@ -11,6 +11,7 @@ categories = ["network-programming", "command-line-utilities"]
 ebpf-xdp-program-common = { path = "../ebpf-xdp-program-common", features = [
     "user",
 ] }
+ewma-detector = { path = "../ewma-detector" }
 
 anyhow = { workspace = true, default-features = true }
 aya = { workspace = true }
