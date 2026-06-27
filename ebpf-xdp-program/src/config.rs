@@ -67,6 +67,48 @@ pub struct EmergencyThresholdConfig {
     pub max_bps: Option<f64>,
 }
 
+// ─── Resolved config (actually-in-effect values, for the `/config` API) ──────
+
+/// Resolved EWMA baseline parameters, after defaults have been merged in.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResolvedBaselineConfig {
+    pub alpha: f64,
+    pub min_samples: u64,
+    pub min_stddev: f64,
+    /// Stored in human-facing seconds (not the derived tick count), so the
+    /// value stays meaningful regardless of `ANOMALY_EVAL_INTERVAL`.
+    pub min_elapsed_secs: u64,
+}
+
+/// Resolved view of a single alert rule, with enum fields rendered as labels.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResolvedAlertRuleConfig {
+    pub kind: &'static str,
+    pub min_level: &'static str,
+    pub min_confidence: f64,
+    pub cooldown_secs: u64,
+    pub consecutive_threshold: u32,
+    pub resolve_consecutive_threshold: u32,
+    pub freezes_baseline: bool,
+}
+
+/// Resolved view of a single per-protocol emergency threshold.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResolvedEmergencyThresholdConfig {
+    pub proto: &'static str,
+    pub max_pps: Option<f64>,
+    pub max_bps: Option<f64>,
+}
+
+/// The actually-in-effect configuration, resolved from either a TOML file or
+/// compiled-in defaults. Serialised as-is by the `/config` API endpoint.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResolvedConfig {
+    pub baseline: ResolvedBaselineConfig,
+    pub alert_rules: Vec<ResolvedAlertRuleConfig>,
+    pub emergency_thresholds: Vec<ResolvedEmergencyThresholdConfig>,
+}
+
 // ─── String → domain type parsers ────────────────────────────────────────────
 
 fn parse_anomaly_level(s: &str) -> anyhow::Result<AnomalyLevel> {
@@ -100,20 +142,25 @@ fn parse_proto_index(s: &str) -> anyhow::Result<ProtoIndex> {
 
 // ─── Builders ────────────────────────────────────────────────────────────────
 
-fn build_estimator(baseline: Option<BaselineConfig>) -> EwmaEstimator {
-    let defaults = default_baseline_estimator();
-    let Some(b) = baseline else { return defaults };
+/// Builds the EWMA estimator from optional overrides, returning both the
+/// domain object and the resolved scalars used to build it. `EwmaEstimator`
+/// has no getters, so this is the only point where those scalars are
+/// observable — captured here once, with no separate/divergent default path.
+fn build_estimator(baseline: Option<BaselineConfig>) -> (EwmaEstimator, ResolvedBaselineConfig) {
+    let alpha = baseline.as_ref().and_then(|b| b.alpha).unwrap_or(0.4);
+    let min_samples = baseline.as_ref().and_then(|b| b.min_samples).unwrap_or(5);
+    let min_stddev = baseline.as_ref().and_then(|b| b.min_stddev).unwrap_or(1e-3);
+    let min_elapsed_secs = baseline.and_then(|b| b.min_elapsed_secs).unwrap_or(120);
+    let min_elapsed_ticks = min_elapsed_secs.div_ceil(crate::ANOMALY_EVAL_INTERVAL.as_secs());
 
-    // Decompose defaults to extract their individual parameters.
-    // We re-create with overrides applied on top.
-    EwmaEstimator::new(
-        b.alpha.unwrap_or(0.4),
-        b.min_samples.unwrap_or(5),
-        b.min_stddev.unwrap_or(1e-3),
-        b.min_elapsed_secs
-            .unwrap_or(120)
-            .div_ceil(crate::ANOMALY_EVAL_INTERVAL.as_secs()),
-    )
+    let estimator = EwmaEstimator::new(alpha, min_samples, min_stddev, min_elapsed_ticks);
+    let resolved = ResolvedBaselineConfig {
+        alpha,
+        min_samples,
+        min_stddev,
+        min_elapsed_secs,
+    };
+    (estimator, resolved)
 }
 
 fn build_alert_rules(rules: Vec<AlertRuleConfig>) -> anyhow::Result<Vec<AlertRule>> {
@@ -136,9 +183,32 @@ fn build_alert_rules(rules: Vec<AlertRuleConfig>) -> anyhow::Result<Vec<AlertRul
         .collect()
 }
 
+/// Projects a constructed [`AlertRule`] into its resolved JSON view.
+///
+/// `AlertRule`'s fields are all public, so this can run on any `Vec<AlertRule>`
+/// (built from a TOML override or a compiled-in default) after the fact —
+/// there's exactly one place where an `AlertRule`'s values exist, and this is
+/// a pure projection of it, so the rendered view can't drift from what's
+/// actually loaded into the `AlertManager`.
+fn resolve_alert_rule(rule: &AlertRule) -> ResolvedAlertRuleConfig {
+    ResolvedAlertRuleConfig {
+        kind: rule.kind.label(),
+        min_level: rule.min_level.label(),
+        min_confidence: rule.min_confidence,
+        cooldown_secs: rule.cooldown.as_secs(),
+        consecutive_threshold: rule.consecutive_threshold,
+        resolve_consecutive_threshold: rule.resolve_consecutive_threshold,
+        freezes_baseline: rule.freezes_baseline,
+    }
+}
+
+/// Builds the emergency detector from TOML overrides, returning both the
+/// domain object and the resolved per-protocol thresholds used to build it.
+/// `EmergencyDetector` has no getter for its thresholds, so (like
+/// `build_estimator`) this is the only point where they're observable.
 fn build_emergency_detector(
     thresholds: Vec<EmergencyThresholdConfig>,
-) -> anyhow::Result<EmergencyDetector> {
+) -> anyhow::Result<(EmergencyDetector, Vec<ResolvedEmergencyThresholdConfig>)> {
     let ts: anyhow::Result<Vec<EmergencyThreshold>> = thresholds
         .into_iter()
         .enumerate()
@@ -151,45 +221,83 @@ fn build_emergency_detector(
             })
         })
         .collect();
-    Ok(EmergencyDetector::new(ts?))
+    let ts = ts?;
+    let resolved = resolve_emergency_thresholds(&ts);
+    Ok((EmergencyDetector::new(ts), resolved))
+}
+
+fn resolve_emergency_thresholds(ts: &[EmergencyThreshold]) -> Vec<ResolvedEmergencyThresholdConfig> {
+    ts.iter()
+        .map(|t| ResolvedEmergencyThresholdConfig {
+            proto: t.proto.label(),
+            max_pps: t.max_pps,
+            max_bps: t.max_bps,
+        })
+        .collect()
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
-/// Loads and parses a TOML configuration file, returning domain objects.
+/// Loads and parses a TOML configuration file, returning domain objects plus
+/// the resolved configuration view used by the `/config` API endpoint.
 ///
 /// Any section or field omitted from the file falls back to the compiled-in
 /// defaults. Returns an error if the file cannot be read or the TOML is invalid.
 pub fn load_config(
     path: &std::path::Path,
-) -> anyhow::Result<(EwmaEstimator, EmergencyDetector, Vec<AlertRule>)> {
+) -> anyhow::Result<(EwmaEstimator, EmergencyDetector, Vec<AlertRule>, ResolvedConfig)> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config file: {}", path.display()))?;
     let cfg: Config = toml::from_str(&text)
         .with_context(|| format!("failed to parse config file: {}", path.display()))?;
 
-    let estimator = build_estimator(cfg.baseline);
-    let emergency = if cfg.emergency_thresholds.is_empty() {
-        default_emergency_detector()
+    let (estimator, resolved_baseline) = build_estimator(cfg.baseline);
+
+    let (emergency, resolved_emergency_thresholds) = if cfg.emergency_thresholds.is_empty() {
+        (
+            default_emergency_detector(),
+            resolve_emergency_thresholds(&default_emergency_thresholds()),
+        )
     } else {
         build_emergency_detector(cfg.emergency_thresholds)?
     };
+
     let rules = if cfg.alert_rules.is_empty() {
         default_alert_rules()
     } else {
         build_alert_rules(cfg.alert_rules)?
     };
+    let resolved_alert_rules = rules.iter().map(resolve_alert_rule).collect();
 
-    Ok((estimator, emergency, rules))
+    let resolved = ResolvedConfig {
+        baseline: resolved_baseline,
+        alert_rules: resolved_alert_rules,
+        emergency_thresholds: resolved_emergency_thresholds,
+    };
+
+    Ok((estimator, emergency, rules, resolved))
+}
+
+/// Resolves the effective configuration from an optional TOML file path,
+/// falling back to compiled-in defaults when `config_path` is `None`. Single
+/// entry point so callers (just `main.rs`) don't need to know about the
+/// TOML-vs-defaults branching.
+pub fn resolve_all(
+    config_path: Option<&std::path::Path>,
+) -> anyhow::Result<(EwmaEstimator, EmergencyDetector, Vec<AlertRule>, ResolvedConfig)> {
+    match config_path {
+        Some(path) => load_config(path),
+        None => Ok((
+            default_baseline_estimator(),
+            default_emergency_detector(),
+            default_alert_rules(),
+            default_resolved_config(),
+        )),
+    }
 }
 
 pub fn default_baseline_estimator() -> EwmaEstimator {
-    EwmaEstimator::new(
-        0.4,
-        5,
-        1e-3,
-        120u64.div_ceil(crate::ANOMALY_EVAL_INTERVAL.as_secs()),
-    )
+    build_estimator(None).0
 }
 
 pub fn default_alert_rules() -> Vec<AlertRule> {
@@ -215,12 +323,26 @@ pub fn default_alert_rules() -> Vec<AlertRule> {
     ]
 }
 
-pub fn default_emergency_detector() -> EmergencyDetector {
-    EmergencyDetector::new(vec![EmergencyThreshold {
+fn default_emergency_thresholds() -> Vec<EmergencyThreshold> {
+    vec![EmergencyThreshold {
         proto: ProtoIndex::Icmp,
         max_pps: Some(3.0),
         max_bps: None,
-    }])
+    }]
+}
+
+pub fn default_emergency_detector() -> EmergencyDetector {
+    EmergencyDetector::new(default_emergency_thresholds())
+}
+
+/// Resolved view of [`default_baseline_estimator`] + [`default_alert_rules`] +
+/// [`default_emergency_detector`], for the no-config-file startup path.
+pub fn default_resolved_config() -> ResolvedConfig {
+    ResolvedConfig {
+        baseline: build_estimator(None).1,
+        alert_rules: default_alert_rules().iter().map(resolve_alert_rule).collect(),
+        emergency_thresholds: resolve_emergency_thresholds(&default_emergency_thresholds()),
+    }
 }
 
 #[cfg(test)]
@@ -303,12 +425,31 @@ mod tests {
     #[test]
     fn build_estimator_none_uses_defaults() {
         use crate::baseline::BaselineState;
-        let est = build_estimator(None);
+        let (est, resolved) = build_estimator(None);
         // No samples fed — must still be in Warming state.
         assert!(matches!(
             est.snapshot(ProtoIndex::Tcp),
             BaselineState::Warming
         ));
+        assert_eq!(resolved.alpha, 0.4);
+        assert_eq!(resolved.min_samples, 5);
+        assert_eq!(resolved.min_stddev, 1e-3);
+        assert_eq!(resolved.min_elapsed_secs, 120);
+    }
+
+    #[test]
+    fn build_estimator_applies_overrides_to_resolved_view() {
+        let (_, resolved) = build_estimator(Some(BaselineConfig {
+            alpha: Some(0.2),
+            min_samples: Some(10),
+            min_stddev: None,
+            min_elapsed_secs: None,
+        }));
+        assert_eq!(resolved.alpha, 0.2);
+        assert_eq!(resolved.min_samples, 10);
+        // Omitted fields still fall back to defaults.
+        assert_eq!(resolved.min_stddev, 1e-3);
+        assert_eq!(resolved.min_elapsed_secs, 120);
     }
 
     // ── build_alert_rules ────────────────────────────────────────────────────
@@ -416,10 +557,46 @@ freezes_baseline = false
 "#,
         )
         .unwrap();
-        let (_, _, rules) = load_config(&path).expect("should parse");
+        let (_, _, rules, resolved) = load_config(&path).expect("should parse");
         assert_eq!(rules.len(), 1);
         assert!(matches!(rules[0].kind, AlertKind::Drop));
         assert!(matches!(rules[0].min_level, AnomalyLevel::Severe));
+
+        assert_eq!(resolved.baseline.alpha, 0.2);
+        assert_eq!(resolved.baseline.min_samples, 10);
+        assert_eq!(resolved.alert_rules.len(), 1);
+        assert_eq!(resolved.alert_rules[0].kind, "drop");
+        assert_eq!(resolved.alert_rules[0].min_level, "severe");
+    }
+
+    // ── resolved config ──────────────────────────────────────────────────────
+
+    #[test]
+    fn default_resolved_config_matches_compiled_in_defaults() {
+        let resolved = default_resolved_config();
+        assert_eq!(resolved.baseline.alpha, 0.4);
+        assert_eq!(resolved.baseline.min_samples, 5);
+        assert_eq!(resolved.alert_rules.len(), default_alert_rules().len());
+        assert_eq!(resolved.alert_rules[0].kind, "spike");
+        assert_eq!(resolved.alert_rules[1].kind, "emergency");
+        assert_eq!(resolved.emergency_thresholds.len(), 1);
+        assert_eq!(resolved.emergency_thresholds[0].proto, "ICMP");
+        assert_eq!(resolved.emergency_thresholds[0].max_pps, Some(3.0));
+    }
+
+    #[test]
+    fn resolve_all_none_matches_defaults() {
+        let (_, _, rules, resolved) = resolve_all(None).expect("should resolve defaults");
+        assert_eq!(rules.len(), default_alert_rules().len());
+        assert_eq!(resolved.baseline.alpha, 0.4);
+    }
+
+    #[test]
+    fn resolve_all_some_path_loads_file() {
+        let path = std::env::temp_dir().join("test_resolve_all_path.toml");
+        std::fs::write(&path, "[baseline]\nalpha = 0.7\n").unwrap();
+        let (_, _, _, resolved) = resolve_all(Some(&path)).expect("should resolve from file");
+        assert_eq!(resolved.baseline.alpha, 0.7);
     }
 
     #[test]

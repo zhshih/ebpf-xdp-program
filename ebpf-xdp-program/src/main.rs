@@ -111,14 +111,10 @@ async fn main() -> anyhow::Result<()> {
 
     let mut current_counters: Option<TrafficCountersSnapshot> = None;
     let mut prev_mix_counters: Option<TrafficCountersSnapshot> = None;
-    let (estimator, emergency_detector, alert_rules) = match &config_path {
-        Some(path) => config::load_config(path)?,
-        None => (
-            config::default_baseline_estimator(),
-            config::default_emergency_detector(),
-            config::default_alert_rules(),
-        ),
-    };
+    // `_resolved_config` will back the `/config` API endpoint once the Axum
+    // server is wired in.
+    let (estimator, emergency_detector, alert_rules, _resolved_config) =
+        config::resolve_all(config_path.as_deref())?;
     let mut anomaly_runner = AnomalyRunner::new(
         estimator,
         emergency_detector,
