@@ -7,7 +7,7 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 
 use crate::{
     alert::{AlertKind, AlertLifecycle, AlertMetricsSnapshot},
-    anomaly::compute_proto_z_scores,
+    anomaly::{AnomalyLevel, compute_anomaly_view},
     baseline::{BaselineState, EwmaEstimator},
     rate::ProtoRate,
 };
@@ -155,25 +155,16 @@ impl MetricsHandle {
     pub fn update_anomaly(&self, rates: &[ProtoRate], estimator: &EwmaEstimator) {
         for r in rates {
             let label = r.proto.label();
-            let (z_pps, z_bps, level_val, confidence) = match estimator.snapshot(r.proto) {
-                BaselineState::Ready { baseline } => {
-                    let (z_pps, z_bps) = compute_proto_z_scores(&baseline, r.pps, r.bps);
-                    let abs_z = z_pps.abs().max(z_bps.abs());
-                    let level_val = if abs_z >= 6.0 {
-                        2.0
-                    } else if abs_z >= 3.0 {
-                        1.0
-                    } else {
-                        0.0
-                    };
-                    (z_pps, z_bps, level_val, (abs_z / 10.0).min(1.0))
-                }
-                BaselineState::Warming => (0.0, 0.0, 0.0, 0.0),
+            let view = compute_anomaly_view(&estimator.snapshot(r.proto), r.pps, r.bps);
+            let level_val = match view.level {
+                AnomalyLevel::Normal => 0.0,
+                AnomalyLevel::Suspicious => 1.0,
+                AnomalyLevel::Severe => 2.0,
             };
-            metrics::gauge!("xdp_anomaly_z_score_pps", "proto" => label).set(z_pps);
-            metrics::gauge!("xdp_anomaly_z_score_bps", "proto" => label).set(z_bps);
+            metrics::gauge!("xdp_anomaly_z_score_pps", "proto" => label).set(view.z_pps);
+            metrics::gauge!("xdp_anomaly_z_score_bps", "proto" => label).set(view.z_bps);
             metrics::gauge!("xdp_anomaly_level",       "proto" => label).set(level_val);
-            metrics::gauge!("xdp_anomaly_confidence",  "proto" => label).set(confidence);
+            metrics::gauge!("xdp_anomaly_confidence",  "proto" => label).set(view.confidence);
         }
     }
 
