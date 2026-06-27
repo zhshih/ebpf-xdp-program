@@ -7,4 +7,4 @@
 //! emits Prometheus metrics.
 mod runner;
 
-pub use runner::AnomalyRunner;
+pub use runner::{AlertSlotSnapshot, AnomalyRunner, ProtoSnapshot, RunnerSnapshot};
