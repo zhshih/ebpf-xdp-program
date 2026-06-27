@@ -93,9 +93,15 @@ pub struct ResolvedAlertRuleConfig {
 }
 
 /// Resolved view of a single per-protocol emergency threshold.
+///
+/// `proto` is lowercased from `ProtoIndex::label()` (which returns `"ICMP"`,
+/// `"TCP"`, etc. for Prometheus label compatibility) so the JSON view stays
+/// consistent with the lowercase `kind`/`min_level` labels above — this is a
+/// JSON-boundary-only adjustment; `ProtoIndex::label()` itself is left
+/// untouched since it backs live Prometheus label values.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ResolvedEmergencyThresholdConfig {
-    pub proto: &'static str,
+    pub proto: String,
     pub max_pps: Option<f64>,
     pub max_bps: Option<f64>,
 }
@@ -229,7 +235,7 @@ fn build_emergency_detector(
 fn resolve_emergency_thresholds(ts: &[EmergencyThreshold]) -> Vec<ResolvedEmergencyThresholdConfig> {
     ts.iter()
         .map(|t| ResolvedEmergencyThresholdConfig {
-            proto: t.proto.label(),
+            proto: t.proto.label().to_ascii_lowercase(),
             max_pps: t.max_pps,
             max_bps: t.max_bps,
         })
@@ -580,7 +586,7 @@ freezes_baseline = false
         assert_eq!(resolved.alert_rules[0].kind, "spike");
         assert_eq!(resolved.alert_rules[1].kind, "emergency");
         assert_eq!(resolved.emergency_thresholds.len(), 1);
-        assert_eq!(resolved.emergency_thresholds[0].proto, "ICMP");
+        assert_eq!(resolved.emergency_thresholds[0].proto, "icmp");
         assert_eq!(resolved.emergency_thresholds[0].max_pps, Some(3.0));
     }
 

@@ -1,5 +1,6 @@
 mod alert;
 mod anomaly;
+mod api;
 mod baseline;
 mod config;
 mod metrics;
