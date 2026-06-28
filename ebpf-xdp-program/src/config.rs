@@ -232,7 +232,9 @@ fn build_emergency_detector(
     Ok((EmergencyDetector::new(ts), resolved))
 }
 
-fn resolve_emergency_thresholds(ts: &[EmergencyThreshold]) -> Vec<ResolvedEmergencyThresholdConfig> {
+fn resolve_emergency_thresholds(
+    ts: &[EmergencyThreshold],
+) -> Vec<ResolvedEmergencyThresholdConfig> {
     ts.iter()
         .map(|t| ResolvedEmergencyThresholdConfig {
             proto: t.proto.label().to_ascii_lowercase(),
@@ -251,7 +253,12 @@ fn resolve_emergency_thresholds(ts: &[EmergencyThreshold]) -> Vec<ResolvedEmerge
 /// defaults. Returns an error if the file cannot be read or the TOML is invalid.
 pub fn load_config(
     path: &std::path::Path,
-) -> anyhow::Result<(EwmaEstimator, EmergencyDetector, Vec<AlertRule>, ResolvedConfig)> {
+) -> anyhow::Result<(
+    EwmaEstimator,
+    EmergencyDetector,
+    Vec<AlertRule>,
+    ResolvedConfig,
+)> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config file: {}", path.display()))?;
     let cfg: Config = toml::from_str(&text)
@@ -290,7 +297,12 @@ pub fn load_config(
 /// TOML-vs-defaults branching.
 pub fn resolve_all(
     config_path: Option<&std::path::Path>,
-) -> anyhow::Result<(EwmaEstimator, EmergencyDetector, Vec<AlertRule>, ResolvedConfig)> {
+) -> anyhow::Result<(
+    EwmaEstimator,
+    EmergencyDetector,
+    Vec<AlertRule>,
+    ResolvedConfig,
+)> {
     match config_path {
         Some(path) => load_config(path),
         None => Ok((
@@ -346,7 +358,10 @@ pub fn default_emergency_detector() -> EmergencyDetector {
 pub fn default_resolved_config() -> ResolvedConfig {
     ResolvedConfig {
         baseline: build_estimator(None).1,
-        alert_rules: default_alert_rules().iter().map(resolve_alert_rule).collect(),
+        alert_rules: default_alert_rules()
+            .iter()
+            .map(resolve_alert_rule)
+            .collect(),
         emergency_thresholds: resolve_emergency_thresholds(&default_emergency_thresholds()),
     }
 }

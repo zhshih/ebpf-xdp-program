@@ -12,6 +12,8 @@ pub mod detector;
 pub mod emergency;
 pub mod ewma;
 
-pub use detector::{AnomalyDetector, AnomalyLevel, AnomalyView, DetectResult, compute_anomaly_view};
+pub use detector::{
+    AnomalyDetector, AnomalyLevel, AnomalyView, DetectResult, compute_anomaly_view,
+};
 pub use emergency::{EmergencyDetector, EmergencyThreshold};
 pub use ewma::EwmaDetector;

@@ -4,7 +4,10 @@ use ebpf_xdp_program_common::ProtoIndex;
 
 use crate::{
     alert::{AlertEvent, AlertKind, AlertManager, AlertSignal},
-    anomaly::{AnomalyDetector, AnomalyView, DetectResult, EmergencyDetector, EwmaDetector, compute_anomaly_view},
+    anomaly::{
+        AnomalyDetector, AnomalyView, DetectResult, EmergencyDetector, EwmaDetector,
+        compute_anomaly_view,
+    },
     baseline::{BaselineState, EwmaEstimator},
     metrics::MetricsHandle,
     rate::{ProtoRate, TrafficCountersSnapshot, compute_rates},
@@ -396,15 +399,23 @@ mod tests {
             .iter()
             .find(|p| p.proto == ProtoIndex::Tcp)
             .expect("TCP entry present");
-        assert!(tcp.rate.is_some(), "rate should be populated after a full tick");
+        assert!(
+            tcp.rate.is_some(),
+            "rate should be populated after a full tick"
+        );
         assert!(
             matches!(tcp.baseline, crate::baseline::BaselineState::Warming),
             "single sample isn't enough to leave Warming"
         );
         // Baseline is still warming, so the anomaly view is the zeroed/Normal default.
-        let anomaly = tcp.anomaly.expect("anomaly view computed whenever a rate is present");
+        let anomaly = tcp
+            .anomaly
+            .expect("anomaly view computed whenever a rate is present");
         assert_eq!(anomaly.z_pps, 0.0);
-        assert!(matches!(anomaly.level, crate::anomaly::AnomalyLevel::Normal));
+        assert!(matches!(
+            anomaly.level,
+            crate::anomaly::AnomalyLevel::Normal
+        ));
     }
 
     #[test]

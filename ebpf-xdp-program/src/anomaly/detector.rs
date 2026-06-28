@@ -119,7 +119,12 @@ mod tests {
         assert_eq!(AnomalyLevel::Severe.label(), "severe");
     }
 
-    fn ready_baseline(pps_mean: f64, pps_stddev: f64, bps_mean: f64, bps_stddev: f64) -> BaselineState {
+    fn ready_baseline(
+        pps_mean: f64,
+        pps_stddev: f64,
+        bps_mean: f64,
+        bps_stddev: f64,
+    ) -> BaselineState {
         use crate::baseline::{BaselineStats, ProtoBaseline};
 
         BaselineState::Ready {
