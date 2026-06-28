@@ -328,6 +328,48 @@ mod tests {
         // baseline is Warming after 1 sample → WarmingUp outcome, no panic
     }
 
+    /// `warmed_up()` flips `true` once the EWMA detector stops reporting
+    /// `WarmingUp` for at least one protocol — exercised through real
+    /// `tick()` calls rather than constructing `PipelineOutcome` directly,
+    /// since no existing test drove `AnomalyRunner.warmed_up()` to `true`.
+    #[test]
+    fn runner_warms_up_after_enough_ticks() {
+        use crate::baseline::EwmaEstimator;
+
+        // min_samples=3, min_elapsed_ticks=0 so only the sample-count gate matters.
+        let estimator = EwmaEstimator::new(0.4, 3, 1e-3, 0);
+        let mut runner = AnomalyRunner::new(
+            estimator,
+            default_emergency_detector(),
+            AlertManager::new(default_alert_rules()),
+        );
+
+        let mut t = Instant::now();
+        let mut pkts = 100u64;
+        let mut bytes = 10_000u64;
+        runner.tick(&Some(make_counter_snapshot(t, pkts, bytes)), &MetricsHandle); // prime
+
+        assert!(!runner.warmed_up(), "should still be warming after priming");
+
+        // Alternating deltas build variance above min_stddev quickly.
+        for i in 0..6 {
+            t += Duration::from_secs(1);
+            if i % 2 == 0 {
+                pkts += 100;
+                bytes += 10_000;
+            } else {
+                pkts += 50;
+                bytes += 5_000;
+            }
+            runner.tick(&Some(make_counter_snapshot(t, pkts, bytes)), &MetricsHandle);
+        }
+
+        assert!(
+            runner.warmed_up(),
+            "expected baseline to warm up after 6 ticks with min_samples=3"
+        );
+    }
+
     #[test]
     fn snapshot_before_any_tick_has_no_rates() {
         let runner = make_runner();
