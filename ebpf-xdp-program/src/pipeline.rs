@@ -6,5 +6,7 @@
 //! EWMA baseline (skipping protocols currently frozen by a hot alert), and
 //! emits Prometheus metrics.
 mod runner;
+mod synflood_runner;
 
 pub use runner::{AlertSlotSnapshot, AnomalyRunner, ProtoSnapshot, RunnerSnapshot};
+pub use synflood_runner::{SynFloodRunner, SynFloodSnapshot};
