@@ -9,7 +9,7 @@ mod rate;
 
 use anyhow::Context as _;
 use aya::{
-    maps::PerCpuArray,
+    maps::{HashMap as BpfHashMap, PerCpuArray},
     programs::{Xdp, XdpFlags},
 };
 use clap::Parser;
@@ -17,7 +17,7 @@ use clap::Parser;
 use log::warn;
 use std::time::Duration;
 
-use ebpf_xdp_program_common::{ProtoIndex, ProtoStats};
+use ebpf_xdp_program_common::{ProtoIndex, ProtoStats, SynCounter};
 use tokio::signal;
 
 use crate::{
@@ -128,6 +128,14 @@ async fn main() -> anyhow::Result<()> {
     let proto_stats: PerCpuArray<_, ProtoStats> = PerCpuArray::try_from(
         ebpf.map("PROTO_STATS")
             .context("PROTO_STATS map not found")?,
+    )?;
+
+    // The kernel side declares this as an `LruHashMap`, but aya's user-space
+    // `HashMap` wrapper reads back both `HashMap` and `LruHashMap` kernel
+    // map variants — there is no separate user-space `LruHashMap` type.
+    let syn_tracker: BpfHashMap<_, u32, SynCounter> = BpfHashMap::try_from(
+        ebpf.map("SYN_TRACKER")
+            .context("SYN_TRACKER map not found")?,
     )?;
 
     let mut stats_poll_tick = tokio::time::interval(STATS_POLL_INTERVAL);
