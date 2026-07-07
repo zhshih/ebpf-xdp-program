@@ -6,6 +6,8 @@
 //! [`ProtoRate`] (pps/bps) values for use by the anomaly pipeline.
 pub mod compute;
 pub mod model;
+pub mod synflood;
 
 pub use compute::{compute_mix, compute_rates, diff_stats, read_snapshot};
 pub use model::{ProtoRate, TrafficCountersSnapshot};
+pub use synflood::{SynCountersSnapshot, SynIpRate, compute_syn_rates_top_n, read_syn_snapshot};
