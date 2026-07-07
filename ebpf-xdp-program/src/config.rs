@@ -4,8 +4,8 @@ use anyhow::Context as _;
 use ebpf_xdp_program_common::ProtoIndex;
 
 use crate::{
-    alert::{AlertKind, AlertRule},
-    anomaly::{AnomalyLevel, EmergencyDetector, EmergencyThreshold},
+    alert::{AlertKind, AlertRule, SynFloodAlertManager},
+    anomaly::{AnomalyLevel, EmergencyDetector, EmergencyThreshold, SynFloodDetector},
     baseline::EwmaEstimator,
 };
 
@@ -22,6 +22,7 @@ pub struct Config {
     pub alert_rules: Vec<AlertRuleConfig>,
     #[serde(default)]
     pub emergency_thresholds: Vec<EmergencyThresholdConfig>,
+    pub syn_flood: Option<SynFloodConfig>,
 }
 
 /// Overrides for the EWMA baseline estimator parameters.
@@ -67,6 +68,21 @@ pub struct EmergencyThresholdConfig {
     pub max_bps: Option<f64>,
 }
 
+/// Overrides for per-source-IP SYN-flood detection.
+#[derive(serde::Deserialize)]
+pub struct SynFloodConfig {
+    /// Maximum allowed SYN packets-per-second from a single source IP.
+    pub max_syn_pps: Option<f64>,
+    /// Number of top-offending source IPs tracked/alerted on per tick.
+    pub top_n: Option<usize>,
+    /// Re-fire suppression window in seconds.
+    pub cooldown_secs: Option<u64>,
+    /// Consecutive over-threshold ticks required to fire.
+    pub consecutive_threshold: Option<u32>,
+    /// Consecutive under-threshold ticks required to resolve.
+    pub resolve_consecutive_threshold: Option<u32>,
+}
+
 // ─── Resolved config (actually-in-effect values, for the `/config` API) ──────
 
 /// Resolved EWMA baseline parameters, after defaults have been merged in.
@@ -106,6 +122,16 @@ pub struct ResolvedEmergencyThresholdConfig {
     pub max_bps: Option<f64>,
 }
 
+/// Resolved per-source-IP SYN-flood detection parameters.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResolvedSynFloodConfig {
+    pub max_syn_pps: f64,
+    pub top_n: usize,
+    pub cooldown_secs: u64,
+    pub consecutive_threshold: u32,
+    pub resolve_consecutive_threshold: u32,
+}
+
 /// The actually-in-effect configuration, resolved from either a TOML file or
 /// compiled-in defaults. Serialised as-is by the `/config` API endpoint.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -113,6 +139,7 @@ pub struct ResolvedConfig {
     pub baseline: ResolvedBaselineConfig,
     pub alert_rules: Vec<ResolvedAlertRuleConfig>,
     pub emergency_thresholds: Vec<ResolvedEmergencyThresholdConfig>,
+    pub syn_flood: ResolvedSynFloodConfig,
 }
 
 // ─── String → domain type parsers ────────────────────────────────────────────
@@ -244,21 +271,62 @@ fn resolve_emergency_thresholds(
         .collect()
 }
 
+/// Builds the SYN-flood detector and alert manager from optional overrides,
+/// returning both domain objects and the resolved scalars used to build
+/// them — same rationale as `build_estimator`/`build_emergency_detector`:
+/// neither domain type exposes getters, so this is the only point where
+/// those scalars are observable.
+fn build_synflood(
+    cfg: Option<SynFloodConfig>,
+) -> (SynFloodDetector, SynFloodAlertManager, ResolvedSynFloodConfig) {
+    let max_syn_pps = cfg.as_ref().and_then(|c| c.max_syn_pps).unwrap_or(100.0);
+    let top_n = cfg.as_ref().and_then(|c| c.top_n).unwrap_or(10);
+    let cooldown_secs = cfg.as_ref().and_then(|c| c.cooldown_secs).unwrap_or(60);
+    let consecutive_threshold = cfg
+        .as_ref()
+        .and_then(|c| c.consecutive_threshold)
+        .unwrap_or(3);
+    let resolve_consecutive_threshold = cfg
+        .and_then(|c| c.resolve_consecutive_threshold)
+        .unwrap_or(3);
+
+    let detector = SynFloodDetector::new(max_syn_pps, top_n);
+    let alert_manager = SynFloodAlertManager::new(
+        Duration::from_secs(cooldown_secs),
+        consecutive_threshold,
+        resolve_consecutive_threshold,
+    );
+    let resolved = ResolvedSynFloodConfig {
+        max_syn_pps,
+        top_n,
+        cooldown_secs,
+        consecutive_threshold,
+        resolve_consecutive_threshold,
+    };
+    (detector, alert_manager, resolved)
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
+
+/// Bundle of all constructed detector/alerting domain objects, returned
+/// alongside [`ResolvedConfig`] by [`load_config`]/[`resolve_all`].
+///
+/// A named struct rather than a growing tuple — cheaper to extend as new
+/// detectors are added, and self-documenting at call sites.
+pub struct ResolvedDetectors {
+    pub baseline: EwmaEstimator,
+    pub emergency: EmergencyDetector,
+    pub alert_rules: Vec<AlertRule>,
+    pub synflood_detector: SynFloodDetector,
+    pub synflood_alert_manager: SynFloodAlertManager,
+}
 
 /// Loads and parses a TOML configuration file, returning domain objects plus
 /// the resolved configuration view used by the `/config` API endpoint.
 ///
 /// Any section or field omitted from the file falls back to the compiled-in
 /// defaults. Returns an error if the file cannot be read or the TOML is invalid.
-pub fn load_config(
-    path: &std::path::Path,
-) -> anyhow::Result<(
-    EwmaEstimator,
-    EmergencyDetector,
-    Vec<AlertRule>,
-    ResolvedConfig,
-)> {
+pub fn load_config(path: &std::path::Path) -> anyhow::Result<(ResolvedDetectors, ResolvedConfig)> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config file: {}", path.display()))?;
     let cfg: Config = toml::from_str(&text)
@@ -282,13 +350,25 @@ pub fn load_config(
     };
     let resolved_alert_rules = rules.iter().map(resolve_alert_rule).collect();
 
+    let (synflood_detector, synflood_alert_manager, resolved_synflood) =
+        build_synflood(cfg.syn_flood);
+
     let resolved = ResolvedConfig {
         baseline: resolved_baseline,
         alert_rules: resolved_alert_rules,
         emergency_thresholds: resolved_emergency_thresholds,
+        syn_flood: resolved_synflood,
     };
 
-    Ok((estimator, emergency, rules, resolved))
+    let detectors = ResolvedDetectors {
+        baseline: estimator,
+        emergency,
+        alert_rules: rules,
+        synflood_detector,
+        synflood_alert_manager,
+    };
+
+    Ok((detectors, resolved))
 }
 
 /// Resolves the effective configuration from an optional TOML file path,
@@ -297,20 +377,22 @@ pub fn load_config(
 /// TOML-vs-defaults branching.
 pub fn resolve_all(
     config_path: Option<&std::path::Path>,
-) -> anyhow::Result<(
-    EwmaEstimator,
-    EmergencyDetector,
-    Vec<AlertRule>,
-    ResolvedConfig,
-)> {
+) -> anyhow::Result<(ResolvedDetectors, ResolvedConfig)> {
     match config_path {
         Some(path) => load_config(path),
-        None => Ok((
-            default_baseline_estimator(),
-            default_emergency_detector(),
-            default_alert_rules(),
-            default_resolved_config(),
-        )),
+        None => {
+            let (synflood_detector, synflood_alert_manager, _) = build_synflood(None);
+            Ok((
+                ResolvedDetectors {
+                    baseline: default_baseline_estimator(),
+                    emergency: default_emergency_detector(),
+                    alert_rules: default_alert_rules(),
+                    synflood_detector,
+                    synflood_alert_manager,
+                },
+                default_resolved_config(),
+            ))
+        }
     }
 }
 
@@ -353,8 +435,17 @@ pub fn default_emergency_detector() -> EmergencyDetector {
     EmergencyDetector::new(default_emergency_thresholds())
 }
 
+pub fn default_synflood_detector() -> SynFloodDetector {
+    build_synflood(None).0
+}
+
+pub fn default_synflood_alert_manager() -> SynFloodAlertManager {
+    build_synflood(None).1
+}
+
 /// Resolved view of [`default_baseline_estimator`] + [`default_alert_rules`] +
-/// [`default_emergency_detector`], for the no-config-file startup path.
+/// [`default_emergency_detector`] + [`default_synflood_detector`], for the
+/// no-config-file startup path.
 pub fn default_resolved_config() -> ResolvedConfig {
     ResolvedConfig {
         baseline: build_estimator(None).1,
@@ -363,6 +454,7 @@ pub fn default_resolved_config() -> ResolvedConfig {
             .map(resolve_alert_rule)
             .collect(),
         emergency_thresholds: resolve_emergency_thresholds(&default_emergency_thresholds()),
+        syn_flood: build_synflood(None).2,
     }
 }
 
@@ -545,6 +637,34 @@ mod tests {
         assert!(build_emergency_detector(cfg).is_err());
     }
 
+    // ── build_synflood ───────────────────────────────────────────────────────
+
+    #[test]
+    fn build_synflood_none_uses_defaults() {
+        let (_, _, resolved) = build_synflood(None);
+        assert_eq!(resolved.max_syn_pps, 100.0);
+        assert_eq!(resolved.top_n, 10);
+        assert_eq!(resolved.cooldown_secs, 60);
+        assert_eq!(resolved.consecutive_threshold, 3);
+        assert_eq!(resolved.resolve_consecutive_threshold, 3);
+    }
+
+    #[test]
+    fn build_synflood_applies_overrides() {
+        let (_, _, resolved) = build_synflood(Some(SynFloodConfig {
+            max_syn_pps: Some(50.0),
+            top_n: Some(5),
+            cooldown_secs: None,
+            consecutive_threshold: None,
+            resolve_consecutive_threshold: None,
+        }));
+        assert_eq!(resolved.max_syn_pps, 50.0);
+        assert_eq!(resolved.top_n, 5);
+        // Omitted fields still fall back to defaults.
+        assert_eq!(resolved.cooldown_secs, 60);
+        assert_eq!(resolved.consecutive_threshold, 3);
+    }
+
     // ── load_config ──────────────────────────────────────────────────────────
 
     #[test]
@@ -578,7 +698,8 @@ freezes_baseline = false
 "#,
         )
         .unwrap();
-        let (_, _, rules, resolved) = load_config(&path).expect("should parse");
+        let (detectors, resolved) = load_config(&path).expect("should parse");
+        let rules = detectors.alert_rules;
         assert_eq!(rules.len(), 1);
         assert!(matches!(rules[0].kind, AlertKind::Drop));
         assert!(matches!(rules[0].min_level, AnomalyLevel::Severe));
@@ -588,6 +709,25 @@ freezes_baseline = false
         assert_eq!(resolved.alert_rules.len(), 1);
         assert_eq!(resolved.alert_rules[0].kind, "drop");
         assert_eq!(resolved.alert_rules[0].min_level, "severe");
+    }
+
+    #[test]
+    fn load_config_with_synflood_overrides() {
+        let path = std::env::temp_dir().join("test_config_synflood_overrides.toml");
+        std::fs::write(
+            &path,
+            r#"
+[syn_flood]
+max_syn_pps = 250.0
+top_n = 3
+"#,
+        )
+        .unwrap();
+        let (_, resolved) = load_config(&path).expect("should parse");
+        assert_eq!(resolved.syn_flood.max_syn_pps, 250.0);
+        assert_eq!(resolved.syn_flood.top_n, 3);
+        // Omitted fields still fall back to defaults.
+        assert_eq!(resolved.syn_flood.cooldown_secs, 60);
     }
 
     // ── resolved config ──────────────────────────────────────────────────────
@@ -606,9 +746,16 @@ freezes_baseline = false
     }
 
     #[test]
+    fn default_resolved_config_includes_synflood_defaults() {
+        let resolved = default_resolved_config();
+        assert_eq!(resolved.syn_flood.max_syn_pps, 100.0);
+        assert_eq!(resolved.syn_flood.top_n, 10);
+    }
+
+    #[test]
     fn resolve_all_none_matches_defaults() {
-        let (_, _, rules, resolved) = resolve_all(None).expect("should resolve defaults");
-        assert_eq!(rules.len(), default_alert_rules().len());
+        let (detectors, resolved) = resolve_all(None).expect("should resolve defaults");
+        assert_eq!(detectors.alert_rules.len(), default_alert_rules().len());
         assert_eq!(resolved.baseline.alpha, 0.4);
     }
 
@@ -616,7 +763,7 @@ freezes_baseline = false
     fn resolve_all_some_path_loads_file() {
         let path = std::env::temp_dir().join("test_resolve_all_path.toml");
         std::fs::write(&path, "[baseline]\nalpha = 0.7\n").unwrap();
-        let (_, _, _, resolved) = resolve_all(Some(&path)).expect("should resolve from file");
+        let (_, resolved) = resolve_all(Some(&path)).expect("should resolve from file");
         assert_eq!(resolved.baseline.alpha, 0.7);
     }
 

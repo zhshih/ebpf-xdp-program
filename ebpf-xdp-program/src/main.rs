@@ -144,13 +144,14 @@ async fn main() -> anyhow::Result<()> {
 
     let mut current_counters: Option<TrafficCountersSnapshot> = None;
     let mut prev_mix_counters: Option<TrafficCountersSnapshot> = None;
-    let (estimator, emergency_detector, alert_rules, resolved_config) =
-        config::resolve_all(config_path.as_deref())?;
+    let (detectors, resolved_config) = config::resolve_all(config_path.as_deref())?;
     let mut anomaly_runner = AnomalyRunner::new(
-        estimator,
-        emergency_detector,
-        AlertManager::new(alert_rules),
+        detectors.baseline,
+        detectors.emergency,
+        AlertManager::new(detectors.alert_rules),
     );
+    // SynFloodRunner wiring lands with the eval-ticker changes in a later phase.
+    let _ = (detectors.synflood_detector, detectors.synflood_alert_manager);
 
     let api_ctx = spawn_api_server(api_port, resolved_config);
 
