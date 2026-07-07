@@ -1,5 +1,6 @@
 mod alert;
 mod anomaly;
+mod api;
 mod baseline;
 mod config;
 mod metrics;
@@ -37,10 +38,33 @@ struct Opt {
     #[clap(long, default_value = "9091")]
     metrics_port: u16,
 
+    /// Port for the read-only JSON API (`/health`, `/config`, `/anomalies`).
+    #[clap(long, default_value = "8080")]
+    api_port: u16,
+
     /// Optional path to a TOML configuration file.
     /// If omitted, compiled-in defaults are used.
     #[clap(long, value_name = "FILE")]
     config: Option<std::path::PathBuf>,
+}
+
+/// Builds the shared API context and spawns the Axum server as an independent
+/// task (fire-and-forget, like the eBPF-logger task above). Returns the
+/// context so the main loop can write tick-derived state into it.
+fn spawn_api_server(port: u16, resolved_config: config::ResolvedConfig) -> api::ApiContext {
+    let ctx = api::ApiContext {
+        resolved_config: std::sync::Arc::new(resolved_config),
+        dynamic: std::sync::Arc::new(tokio::sync::RwLock::new(api::ApiState::new())),
+    };
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    let ctx_for_task = ctx.clone();
+    tokio::task::spawn(async move {
+        if let Err(e) = api::serve(addr, ctx_for_task).await {
+            tracing::error!(error = %e, "API server task exited with error");
+        }
+    });
+    tracing::info!(port, "Axum API listening");
+    ctx
 }
 
 #[tokio::main]
@@ -90,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
     let Opt {
         iface,
         config: config_path,
+        api_port,
         ..
     } = opt;
     let program: &mut Xdp = ebpf
@@ -111,19 +136,15 @@ async fn main() -> anyhow::Result<()> {
 
     let mut current_counters: Option<TrafficCountersSnapshot> = None;
     let mut prev_mix_counters: Option<TrafficCountersSnapshot> = None;
-    let (estimator, emergency_detector, alert_rules) = match &config_path {
-        Some(path) => config::load_config(path)?,
-        None => (
-            config::default_baseline_estimator(),
-            config::default_emergency_detector(),
-            config::default_alert_rules(),
-        ),
-    };
+    let (estimator, emergency_detector, alert_rules, resolved_config) =
+        config::resolve_all(config_path.as_deref())?;
     let mut anomaly_runner = AnomalyRunner::new(
         estimator,
         emergency_detector,
         AlertManager::new(alert_rules),
     );
+
+    let api_ctx = spawn_api_server(api_port, resolved_config);
 
     loop {
         tokio::select! {
@@ -136,6 +157,10 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
                 current_counters = Some(curr.clone());
+                {
+                    let mut state = api_ctx.dynamic.write().await;
+                    state.last_stats_at = Some(std::time::Instant::now());
+                }
 
                 for (idx, s) in curr.stats.iter().enumerate() {
                     let Some(proto) = ProtoIndex::from_index(idx) else { continue };
@@ -183,6 +208,9 @@ async fn main() -> anyhow::Result<()> {
             }
             _ = anomaly_eval_tick.tick() => {
                 anomaly_runner.tick(&current_counters, &metrics_handle);
+                let mut state = api_ctx.dynamic.write().await;
+                state.warmed_up = anomaly_runner.warmed_up();
+                state.runner_snapshot = Some(anomaly_runner.snapshot(std::time::Instant::now()));
             }
             _ = signal::ctrl_c() => {
                 tracing::info!("Exiting...");

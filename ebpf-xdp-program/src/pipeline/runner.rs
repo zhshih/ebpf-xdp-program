@@ -1,9 +1,14 @@
 use std::time::Instant;
 
+use ebpf_xdp_program_common::ProtoIndex;
+
 use crate::{
-    alert::{AlertEvent, AlertManager, AlertSignal},
-    anomaly::{AnomalyDetector, DetectResult, EmergencyDetector, EwmaDetector},
-    baseline::EwmaEstimator,
+    alert::{AlertEvent, AlertKind, AlertManager, AlertSignal},
+    anomaly::{
+        AnomalyDetector, AnomalyView, DetectResult, EmergencyDetector, EwmaDetector,
+        compute_anomaly_view,
+    },
+    baseline::{BaselineState, EwmaEstimator},
     metrics::MetricsHandle,
     rate::{ProtoRate, TrafficCountersSnapshot, compute_rates},
 };
@@ -14,12 +19,44 @@ enum PipelineOutcome {
     Events { events: Vec<AlertEvent> },
 }
 
+/// Point-in-time view of one protocol's alert FSM slot, for the `/anomalies` API.
+#[derive(Debug)]
+pub struct AlertSlotSnapshot {
+    pub kind: AlertKind,
+    pub phase_label: &'static str,
+    pub consecutive_count: u32,
+}
+
+/// Point-in-time view of one protocol's full anomaly/alert state.
+///
+/// `rate`/`anomaly` are `None` until the runner has processed at least two
+/// counter snapshots (the first tick only primes `prev_counters`).
+#[derive(Debug)]
+pub struct ProtoSnapshot {
+    pub proto: ProtoIndex,
+    pub rate: Option<ProtoRate>,
+    pub baseline: BaselineState,
+    pub anomaly: Option<AnomalyView>,
+    pub alerts: Vec<AlertSlotSnapshot>,
+    pub frozen: bool,
+}
+
+/// Point-in-time view of all per-protocol anomaly/alert state, assembled by
+/// [`AnomalyRunner::snapshot`] for the `/anomalies` API endpoint.
+#[derive(Debug)]
+pub struct RunnerSnapshot {
+    pub protos: Vec<ProtoSnapshot>,
+}
+
 pub struct AnomalyRunner {
     prev_counters: Option<TrafficCountersSnapshot>,
     baseline: EwmaEstimator,
     emergency_detector: EmergencyDetector,
     alert_manager: AlertManager,
     warmed_up: bool,
+    /// Rates from the most recently processed tick; empty until the second
+    /// successful tick. Read by [`Self::snapshot`] for the `/anomalies` API.
+    last_rates: Vec<ProtoRate>,
 }
 
 impl AnomalyRunner {
@@ -34,6 +71,7 @@ impl AnomalyRunner {
             emergency_detector,
             alert_manager,
             warmed_up: false,
+            last_rates: Vec::new(),
         }
     }
 
@@ -109,7 +147,52 @@ impl AnomalyRunner {
             metrics.record_alert_event(event.alert.proto, event.alert.kind, event.lifecycle);
         }
 
+        self.last_rates = rates;
         self.prev_counters = Some(curr.clone());
+    }
+
+    /// Whether the EWMA baseline has produced at least one non-warming tick.
+    pub fn warmed_up(&self) -> bool {
+        self.warmed_up
+    }
+
+    /// Assembles a point-in-time view of all per-protocol anomaly/alert state
+    /// for the `/anomalies` API endpoint. Pure read — does not mutate any FSM
+    /// or baseline, and is safe to call from a different task than `tick()`.
+    pub fn snapshot(&self, now: Instant) -> RunnerSnapshot {
+        let frozen = self.alert_manager.frozen_protos(now);
+        let alert_snapshots = self.alert_manager.metrics_snapshot();
+
+        let protos = (0..ProtoIndex::COUNT as usize)
+            .filter_map(ProtoIndex::from_index)
+            .map(|proto| {
+                let rate = self.last_rates.iter().find(|r| r.proto == proto).cloned();
+                let baseline = self.baseline.snapshot(proto);
+                let anomaly = rate
+                    .as_ref()
+                    .map(|r| compute_anomaly_view(&baseline, r.pps, r.bps));
+                let alerts = alert_snapshots
+                    .iter()
+                    .filter(|s| s.proto == proto)
+                    .map(|s| AlertSlotSnapshot {
+                        kind: s.kind,
+                        phase_label: s.phase_label,
+                        consecutive_count: s.consecutive_count,
+                    })
+                    .collect();
+
+                ProtoSnapshot {
+                    proto,
+                    rate,
+                    baseline,
+                    anomaly,
+                    alerts,
+                    frozen: frozen.contains(&proto),
+                }
+            })
+            .collect();
+
+        RunnerSnapshot { protos }
     }
 }
 
@@ -246,6 +329,93 @@ mod tests {
         runner.tick(&Some(snap1), &MetricsHandle); // prime prev_counters
         runner.tick(&Some(snap2), &MetricsHandle); // runs compute_rates → pipeline → baseline.update
         // baseline is Warming after 1 sample → WarmingUp outcome, no panic
+    }
+
+    /// `warmed_up()` flips `true` once the EWMA detector stops reporting
+    /// `WarmingUp` for at least one protocol — exercised through real
+    /// `tick()` calls rather than constructing `PipelineOutcome` directly,
+    /// since no existing test drove `AnomalyRunner.warmed_up()` to `true`.
+    #[test]
+    fn runner_warms_up_after_enough_ticks() {
+        use crate::baseline::EwmaEstimator;
+
+        // min_samples=3, min_elapsed_ticks=0 so only the sample-count gate matters.
+        let estimator = EwmaEstimator::new(0.4, 3, 1e-3, 0);
+        let mut runner = AnomalyRunner::new(
+            estimator,
+            default_emergency_detector(),
+            AlertManager::new(default_alert_rules()),
+        );
+
+        let mut t = Instant::now();
+        let mut pkts = 100u64;
+        let mut bytes = 10_000u64;
+        runner.tick(&Some(make_counter_snapshot(t, pkts, bytes)), &MetricsHandle); // prime
+
+        assert!(!runner.warmed_up(), "should still be warming after priming");
+
+        // Alternating deltas build variance above min_stddev quickly.
+        for i in 0..6 {
+            t += Duration::from_secs(1);
+            if i % 2 == 0 {
+                pkts += 100;
+                bytes += 10_000;
+            } else {
+                pkts += 50;
+                bytes += 5_000;
+            }
+            runner.tick(&Some(make_counter_snapshot(t, pkts, bytes)), &MetricsHandle);
+        }
+
+        assert!(
+            runner.warmed_up(),
+            "expected baseline to warm up after 6 ticks with min_samples=3"
+        );
+    }
+
+    #[test]
+    fn snapshot_before_any_tick_has_no_rates() {
+        let runner = make_runner();
+        let snapshot = runner.snapshot(Instant::now());
+        assert_eq!(snapshot.protos.len(), ProtoIndex::COUNT as usize);
+        assert!(snapshot.protos.iter().all(|p| p.rate.is_none()));
+        assert!(!runner.warmed_up());
+    }
+
+    #[test]
+    fn snapshot_after_second_tick_has_rates_for_every_proto() {
+        let mut runner = make_runner();
+        let t1 = Instant::now();
+        let t2 = t1 + Duration::from_secs(1);
+        let snap1 = make_counter_snapshot(t1, 100, 10_000);
+        let snap2 = make_counter_snapshot(t2, 200, 20_000);
+        runner.tick(&Some(snap1), &MetricsHandle);
+        runner.tick(&Some(snap2), &MetricsHandle);
+
+        let snapshot = runner.snapshot(t2);
+        assert_eq!(snapshot.protos.len(), ProtoIndex::COUNT as usize);
+        let tcp = snapshot
+            .protos
+            .iter()
+            .find(|p| p.proto == ProtoIndex::Tcp)
+            .expect("TCP entry present");
+        assert!(
+            tcp.rate.is_some(),
+            "rate should be populated after a full tick"
+        );
+        assert!(
+            matches!(tcp.baseline, crate::baseline::BaselineState::Warming),
+            "single sample isn't enough to leave Warming"
+        );
+        // Baseline is still warming, so the anomaly view is the zeroed/Normal default.
+        let anomaly = tcp
+            .anomaly
+            .expect("anomaly view computed whenever a rate is present");
+        assert_eq!(anomaly.z_pps, 0.0);
+        assert!(matches!(
+            anomaly.level,
+            crate::anomaly::AnomalyLevel::Normal
+        ));
     }
 
     #[test]

@@ -34,6 +34,12 @@ tracing = "0.1.44"
 network-types = "0.1.0"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
+axum = { version = "0.8", default-features = false, features = ["json", "tokio", "http1"] }
+serde_json = "1"
+
+[dev-dependencies]
+tower = { version = "0.5", default-features = false, features = ["util"] }
+
 [build-dependencies]
 anyhow = { workspace = true }
 aya-build = { workspace = true }
