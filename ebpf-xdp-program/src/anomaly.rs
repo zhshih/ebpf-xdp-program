@@ -11,9 +11,11 @@
 pub mod detector;
 pub mod emergency;
 pub mod ewma;
+pub mod synflood;
 
 pub use detector::{
     AnomalyDetector, AnomalyLevel, AnomalyView, DetectResult, compute_anomaly_view,
 };
 pub use emergency::{EmergencyDetector, EmergencyThreshold};
 pub use ewma::EwmaDetector;
+pub use synflood::{SynFloodDetector, SynFloodSignal};
