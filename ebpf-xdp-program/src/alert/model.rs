@@ -7,11 +7,16 @@ use crate::anomaly::AnomalyLevel;
 /// - `Spike`: traffic rate significantly above the baseline (positive z-score)
 /// - `Drop`: traffic rate significantly below the baseline (negative z-score)
 /// - `Emergency`: absolute threshold breached, regardless of baseline
+/// - `SynFlood`: per-source-IP SYN rate breached an absolute threshold —
+///   label-only reuse of this enum for logging/JSON consistency; never
+///   registered into [`AlertManager`](crate::alert::AlertManager)'s
+///   `ProtoIndex`-keyed rules (see `alert::synflood`)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AlertKind {
     Spike,
     Drop,
     Emergency,
+    SynFlood,
 }
 
 impl AlertKind {
@@ -21,6 +26,7 @@ impl AlertKind {
             AlertKind::Spike => "spike",
             AlertKind::Drop => "drop",
             AlertKind::Emergency => "emergency",
+            AlertKind::SynFlood => "syn_flood",
         }
     }
 }
@@ -47,6 +53,7 @@ mod tests {
         assert_eq!(AlertKind::Spike.label(), "spike");
         assert_eq!(AlertKind::Drop.label(), "drop");
         assert_eq!(AlertKind::Emergency.label(), "emergency");
+        assert_eq!(AlertKind::SynFlood.label(), "syn_flood");
     }
 }
 
