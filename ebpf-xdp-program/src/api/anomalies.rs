@@ -92,21 +92,8 @@ fn proto_view(p: &ProtoSnapshot) -> ProtoAnomalyView {
 fn alert_slot_view(a: &AlertSlotSnapshot) -> AlertSlotView {
     AlertSlotView {
         kind: a.kind.label(),
-        phase: phase_label(a.phase_value),
+        phase: a.phase_label,
         consecutive_count: a.consecutive_count,
-    }
-}
-
-/// Mirrors the 0/1/2 = Inactive/Pending/Firing convention already used by
-/// `xdp_alert_phase` (see `metrics.rs`); `AlertPhase` itself is private to
-/// `alert::state`, so this is a small local re-derivation rather than a new
-/// public accessor threaded through `alert::state` -> `alert::manager`.
-fn phase_label(phase_value: u8) -> &'static str {
-    match phase_value {
-        0 => "inactive",
-        1 => "pending",
-        2 => "firing",
-        _ => "unknown",
     }
 }
 
@@ -222,17 +209,10 @@ mod tests {
     }
 
     #[test]
-    fn phase_label_all_values() {
-        assert_eq!(phase_label(0), "inactive");
-        assert_eq!(phase_label(1), "pending");
-        assert_eq!(phase_label(2), "firing");
-    }
-
-    #[test]
     fn alert_slot_view_maps_fields() {
         let slot = AlertSlotSnapshot {
             kind: AlertKind::Spike,
-            phase_value: 2,
+            phase_label: "firing",
             consecutive_count: 5,
         };
         let view = alert_slot_view(&slot);

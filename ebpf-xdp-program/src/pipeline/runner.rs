@@ -23,7 +23,7 @@ enum PipelineOutcome {
 #[derive(Debug)]
 pub struct AlertSlotSnapshot {
     pub kind: AlertKind,
-    pub phase_value: u8,
+    pub phase_label: &'static str,
     pub consecutive_count: u32,
 }
 
@@ -176,7 +176,7 @@ impl AnomalyRunner {
                     .filter(|s| s.proto == proto)
                     .map(|s| AlertSlotSnapshot {
                         kind: s.kind,
-                        phase_value: s.phase_value,
+                        phase_label: s.phase_label,
                         consecutive_count: s.consecutive_count,
                     })
                     .collect();

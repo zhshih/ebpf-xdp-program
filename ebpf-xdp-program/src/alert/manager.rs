@@ -50,6 +50,7 @@ pub struct AlertMetricsSnapshot {
     pub proto: ProtoIndex,
     pub kind: AlertKind,
     pub phase_value: u8,
+    pub phase_label: &'static str,
     pub consecutive_count: u32,
 }
 
@@ -91,6 +92,7 @@ impl AlertManager {
                 proto: key.proto,
                 kind: key.kind,
                 phase_value: state.phase_value(),
+                phase_label: state.phase_label(),
                 consecutive_count: state.consecutive_count,
             })
             .collect()

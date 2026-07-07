@@ -145,6 +145,15 @@ impl AlertState {
         }
     }
 
+    /// Canonical string label for the current phase, for the `/anomalies` API.
+    pub(crate) fn phase_label(&self) -> &'static str {
+        match self.phase {
+            AlertPhase::Inactive => "inactive",
+            AlertPhase::Pending => "pending",
+            AlertPhase::Firing => "firing",
+        }
+    }
+
     /// Returns `true` if the alert is in `Pending`, `Firing`, or within cooldown of last fire.
     ///
     /// Used by the alert manager to determine which protocols should have
