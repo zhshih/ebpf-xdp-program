@@ -7,6 +7,7 @@
 mod anomalies;
 mod config;
 mod health;
+mod synflood;
 
 use std::{net::SocketAddr, sync::Arc, time::Instant};
 
@@ -14,17 +15,22 @@ use anyhow::Context as _;
 use axum::Router;
 use tokio::sync::RwLock;
 
-use crate::{config::ResolvedConfig, pipeline::RunnerSnapshot};
+use crate::{
+    config::ResolvedConfig,
+    pipeline::{RunnerSnapshot, SynFloodSnapshot},
+};
 
 /// Mutable state written by the main loop, read by API handlers.
 ///
 /// `last_stats_at` is updated once per 1s stats-poll tick; `warmed_up` and
-/// `runner_snapshot` are updated once per 30s anomaly-eval tick.
+/// `runner_snapshot` are updated once per 30s anomaly-eval tick;
+/// `synflood_snapshot` is updated once per SYN-flood eval tick.
 pub struct ApiState {
     pub started_at: Instant,
     pub last_stats_at: Option<Instant>,
     pub warmed_up: bool,
     pub runner_snapshot: Option<RunnerSnapshot>,
+    pub synflood_snapshot: Option<SynFloodSnapshot>,
 }
 
 impl ApiState {
@@ -34,6 +40,7 @@ impl ApiState {
             last_stats_at: None,
             warmed_up: false,
             runner_snapshot: None,
+            synflood_snapshot: None,
         }
     }
 }
@@ -48,12 +55,14 @@ pub struct ApiContext {
     pub dynamic: Arc<RwLock<ApiState>>,
 }
 
-/// Builds the full router: `GET /health`, `GET /config`, `GET /anomalies`.
+/// Builds the full router: `GET /health`, `GET /config`, `GET /anomalies`,
+/// `GET /synflood`.
 pub fn router(ctx: ApiContext) -> Router {
     Router::new()
         .route("/health", axum::routing::get(health::handler))
         .route("/config", axum::routing::get(config::handler))
         .route("/anomalies", axum::routing::get(anomalies::handler))
+        .route("/synflood", axum::routing::get(synflood::handler))
         .with_state(ctx)
 }
 
