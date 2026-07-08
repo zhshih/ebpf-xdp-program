@@ -22,13 +22,22 @@ use tokio::signal;
 
 use crate::{
     alert::AlertManager,
-    pipeline::AnomalyRunner,
-    rate::{TrafficCountersSnapshot, compute_mix, diff_stats, read_snapshot},
+    pipeline::{AnomalyRunner, SynFloodRunner},
+    rate::{
+        SynCountersSnapshot, TrafficCountersSnapshot, compute_mix, diff_stats, read_snapshot,
+        read_syn_snapshot,
+    },
 };
 
 const STATS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MIX_AGG_INTERVAL: Duration = Duration::from_secs(5);
 const ANOMALY_EVAL_INTERVAL: Duration = Duration::from_secs(30);
+// Its own cadence rather than the 1s stats-poll interval: a near-full
+// SYN_TRACKER map read costs ~2x max_entries syscalls, which is wasteful at
+// 1s. Not the 30s anomaly-eval interval either — that's tuned for EWMA
+// baseline warmup, which SynFloodDetector (stateless/threshold-based) has
+// no use for.
+const SYN_FLOOD_EVAL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -141,6 +150,7 @@ async fn main() -> anyhow::Result<()> {
     let mut stats_poll_tick = tokio::time::interval(STATS_POLL_INTERVAL);
     let mut mix_aggregation_tick = tokio::time::interval(MIX_AGG_INTERVAL);
     let mut anomaly_eval_tick = tokio::time::interval(ANOMALY_EVAL_INTERVAL);
+    let mut syn_flood_eval_tick = tokio::time::interval(SYN_FLOOD_EVAL_INTERVAL);
 
     let mut current_counters: Option<TrafficCountersSnapshot> = None;
     let mut prev_mix_counters: Option<TrafficCountersSnapshot> = None;
@@ -150,8 +160,8 @@ async fn main() -> anyhow::Result<()> {
         detectors.emergency,
         AlertManager::new(detectors.alert_rules),
     );
-    // SynFloodRunner wiring lands with the eval-ticker changes in a later phase.
-    let _ = (detectors.synflood_detector, detectors.synflood_alert_manager);
+    let mut syn_flood_runner =
+        SynFloodRunner::new(detectors.synflood_detector, detectors.synflood_alert_manager);
 
     let api_ctx = spawn_api_server(api_port, resolved_config);
 
@@ -220,6 +230,18 @@ async fn main() -> anyhow::Result<()> {
                 let mut state = api_ctx.dynamic.write().await;
                 state.warmed_up = anomaly_runner.warmed_up();
                 state.runner_snapshot = Some(anomaly_runner.snapshot(std::time::Instant::now()));
+            }
+            _ = syn_flood_eval_tick.tick() => {
+                let curr: Option<SynCountersSnapshot> = match read_syn_snapshot(&syn_tracker) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to read SYN_TRACKER snapshot; skipping tick");
+                        continue;
+                    }
+                };
+                syn_flood_runner.tick(&curr, &metrics_handle);
+                let mut state = api_ctx.dynamic.write().await;
+                state.synflood_snapshot = Some(syn_flood_runner.snapshot());
             }
             _ = signal::ctrl_c() => {
                 tracing::info!("Exiting...");

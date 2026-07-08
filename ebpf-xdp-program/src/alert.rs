@@ -12,4 +12,4 @@ pub mod synflood;
 pub use manager::{AlertEvent, AlertManager, AlertMetricsSnapshot, AlertRule};
 pub use model::{AlertKind, AlertSignal};
 pub use state::AlertLifecycle;
-pub use synflood::{SynFloodAlertEvent, SynFloodAlertManager, SynFloodAlertSlotSnapshot};
+pub use synflood::{SynFloodAlertManager, SynFloodAlertSlotSnapshot};

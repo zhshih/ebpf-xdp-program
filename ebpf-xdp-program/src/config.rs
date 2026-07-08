@@ -380,19 +380,16 @@ pub fn resolve_all(
 ) -> anyhow::Result<(ResolvedDetectors, ResolvedConfig)> {
     match config_path {
         Some(path) => load_config(path),
-        None => {
-            let (synflood_detector, synflood_alert_manager, _) = build_synflood(None);
-            Ok((
-                ResolvedDetectors {
-                    baseline: default_baseline_estimator(),
-                    emergency: default_emergency_detector(),
-                    alert_rules: default_alert_rules(),
-                    synflood_detector,
-                    synflood_alert_manager,
-                },
-                default_resolved_config(),
-            ))
-        }
+        None => Ok((
+            ResolvedDetectors {
+                baseline: default_baseline_estimator(),
+                emergency: default_emergency_detector(),
+                alert_rules: default_alert_rules(),
+                synflood_detector: default_synflood_detector(),
+                synflood_alert_manager: default_synflood_alert_manager(),
+            },
+            default_resolved_config(),
+        )),
     }
 }
 

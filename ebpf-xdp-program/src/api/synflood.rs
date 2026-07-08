@@ -16,6 +16,7 @@ pub struct SynFloodOffenderView {
     pub src_ip: String,
     pub pps: f64,
     pub alert_phase: Option<&'static str>,
+    pub alert_consecutive_count: Option<u32>,
 }
 
 pub async fn handler(State(ctx): State<ApiContext>) -> Json<SynFloodResponse> {
@@ -35,14 +36,14 @@ fn to_view(snapshot: &SynFloodSnapshot) -> SynFloodResponse {
     let top_offenders = snapshot
         .top_offenders
         .iter()
-        .map(|r| SynFloodOffenderView {
-            src_ip: r.src_ip.to_string(),
-            pps: r.pps,
-            alert_phase: snapshot
-                .alerts
-                .iter()
-                .find(|a| a.src_ip == r.src_ip)
-                .map(|a| a.phase_label),
+        .map(|r| {
+            let alert = snapshot.alerts.iter().find(|a| a.src_ip == r.src_ip);
+            SynFloodOffenderView {
+                src_ip: r.src_ip.to_string(),
+                pps: r.pps,
+                alert_phase: alert.map(|a| a.phase_label),
+                alert_consecutive_count: alert.map(|a| a.consecutive_count),
+            }
         })
         .collect();
     SynFloodResponse {
@@ -138,6 +139,7 @@ mod tests {
         assert_eq!(offenders[0]["src_ip"], "0.0.0.1");
         assert_eq!(offenders[0]["pps"], 250.0);
         assert_eq!(offenders[0]["alert_phase"], "firing");
+        assert_eq!(offenders[0]["alert_consecutive_count"], 3);
         assert_eq!(parsed["active_alert_count"], 1);
     }
 
@@ -168,11 +170,13 @@ mod tests {
             .find(|o| o.src_ip == "0.0.0.1")
             .unwrap();
         assert!(ip1.alert_phase.is_none());
+        assert!(ip1.alert_consecutive_count.is_none());
         let ip2 = view
             .top_offenders
             .iter()
             .find(|o| o.src_ip == "0.0.0.2")
             .unwrap();
         assert_eq!(ip2.alert_phase, Some("pending"));
+        assert_eq!(ip2.alert_consecutive_count, Some(1));
     }
 }

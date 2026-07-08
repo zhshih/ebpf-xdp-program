@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use crate::{
-    alert::{SynFloodAlertEvent, SynFloodAlertManager, SynFloodAlertSlotSnapshot},
+    alert::{AlertKind, SynFloodAlertManager, SynFloodAlertSlotSnapshot},
     anomaly::SynFloodDetector,
     metrics::MetricsHandle,
     rate::{SynCountersSnapshot, SynIpRate, compute_syn_rates_top_n},
@@ -53,6 +53,7 @@ impl SynFloodRunner {
         for event in &events {
             tracing::warn!(
                 src_ip = %event.src_ip,
+                kind = ?AlertKind::SynFlood,
                 pps = event.pps,
                 confidence = event.confidence,
                 lifecycle = ?event.lifecycle,
