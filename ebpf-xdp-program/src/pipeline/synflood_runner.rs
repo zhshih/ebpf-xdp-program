@@ -60,8 +60,10 @@ impl SynFloodRunner {
             );
         }
 
-        // Metrics wiring lands with the metrics.rs changes; unused for now.
-        let _ = metrics;
+        metrics.update_synflood(&top_n, self.alert_manager.active_count());
+        for event in &events {
+            metrics.record_synflood_event(event.lifecycle);
+        }
 
         self.last_top_n = top_n;
         self.prev_snapshot = Some(curr.clone());

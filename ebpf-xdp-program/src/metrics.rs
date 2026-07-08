@@ -9,7 +9,7 @@ use crate::{
     alert::{AlertKind, AlertLifecycle, AlertMetricsSnapshot},
     anomaly::{AnomalyLevel, compute_anomaly_view},
     baseline::{BaselineState, EwmaEstimator},
-    rate::ProtoRate,
+    rate::{ProtoRate, SynIpRate},
 };
 
 /// Zero-size handle. All metric state lives in the global `metrics` registry.
@@ -106,6 +106,26 @@ fn register_descriptions() {
         "xdp_alert_events_total",
         Unit::Count,
         "Alert lifecycle events (fired|resolved)"
+    );
+    // Deliberately no per-source-IP label on any SYN-flood metric below:
+    // putting attacker-controlled IPs into a Prometheus label value is a
+    // cardinality-explosion vector (rotate source IPs -> blow up the
+    // registry). Per-IP detail is only ever exposed via the bounded
+    // `/synflood` JSON endpoint.
+    describe_gauge!(
+        "xdp_synflood_top_offender_pps",
+        Unit::CountPerSecond,
+        "SYN pps of the single hottest source IP this tick; see /synflood for the bounded top-N breakdown"
+    );
+    describe_gauge!(
+        "xdp_synflood_active_alerts",
+        Unit::Count,
+        "Number of source IPs currently in a Pending/Firing SYN-flood alert state"
+    );
+    describe_counter!(
+        "xdp_synflood_alert_events_total",
+        Unit::Count,
+        "SYN-flood alert lifecycle events (fired|resolved), aggregate only"
     );
 }
 
@@ -213,5 +233,23 @@ impl MetricsHandle {
             "kind"  => kind.label(),
             "lifecycle" => lc_label)
         .increment(1);
+    }
+
+    /// Called at the SYN-flood eval tick with the current top-N offenders
+    /// and count of active alert-manager entries. Aggregate only — no
+    /// per-IP label (see the cardinality note on metric registration above).
+    pub fn update_synflood(&self, top_n: &[SynIpRate], active_alerts: usize) {
+        let top_pps = top_n.first().map_or(0.0, |r| r.pps);
+        metrics::gauge!("xdp_synflood_top_offender_pps").set(top_pps);
+        metrics::gauge!("xdp_synflood_active_alerts").set(active_alerts as f64);
+    }
+
+    /// Called once per SYN-flood `AlertLifecycle` event. Aggregate only.
+    pub fn record_synflood_event(&self, lifecycle: AlertLifecycle) {
+        let lc_label = match lifecycle {
+            AlertLifecycle::Fired => "fired",
+            AlertLifecycle::Resolved => "resolved",
+        };
+        metrics::counter!("xdp_synflood_alert_events_total", "lifecycle" => lc_label).increment(1);
     }
 }
