@@ -278,7 +278,11 @@ fn resolve_emergency_thresholds(
 /// those scalars are observable.
 fn build_synflood(
     cfg: Option<SynFloodConfig>,
-) -> (SynFloodDetector, SynFloodAlertManager, ResolvedSynFloodConfig) {
+) -> (
+    SynFloodDetector,
+    SynFloodAlertManager,
+    ResolvedSynFloodConfig,
+) {
     let max_syn_pps = cfg.as_ref().and_then(|c| c.max_syn_pps).unwrap_or(100.0);
     let top_n = cfg.as_ref().and_then(|c| c.top_n).unwrap_or(10);
     let cooldown_secs = cfg.as_ref().and_then(|c| c.cooldown_secs).unwrap_or(60);

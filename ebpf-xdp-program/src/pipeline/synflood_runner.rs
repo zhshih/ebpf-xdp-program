@@ -84,13 +84,22 @@ impl SynFloodRunner {
 mod tests {
     use std::{net::Ipv4Addr, time::Duration};
 
-    use super::*;
     use ebpf_xdp_program_common::SynCounter;
+
+    use super::*;
 
     fn snap(t: Instant, entries: &[(u32, u64)]) -> SynCountersSnapshot {
         let counters = entries
             .iter()
-            .map(|&(ip, packets)| (ip, SynCounter { packets, bytes: packets * 60 }))
+            .map(|&(ip, packets)| {
+                (
+                    ip,
+                    SynCounter {
+                        packets,
+                        bytes: packets * 60,
+                    },
+                )
+            })
             .collect();
         SynCountersSnapshot {
             timestamp: t,

@@ -160,8 +160,10 @@ async fn main() -> anyhow::Result<()> {
         detectors.emergency,
         AlertManager::new(detectors.alert_rules),
     );
-    let mut syn_flood_runner =
-        SynFloodRunner::new(detectors.synflood_detector, detectors.synflood_alert_manager);
+    let mut syn_flood_runner = SynFloodRunner::new(
+        detectors.synflood_detector,
+        detectors.synflood_alert_manager,
+    );
 
     let api_ctx = spawn_api_server(api_port, resolved_config);
 

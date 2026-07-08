@@ -66,7 +66,11 @@ impl SynFloodAlertManager {
 
     /// Filters/advances FSMs against `signals`, then garbage-collects any
     /// entry that's neither in `signals` nor still hot.
-    pub fn evaluate(&mut self, signals: &[SynFloodSignal], now: Instant) -> Vec<SynFloodAlertEvent> {
+    pub fn evaluate(
+        &mut self,
+        signals: &[SynFloodSignal],
+        now: Instant,
+    ) -> Vec<SynFloodAlertEvent> {
         let active: HashMap<Ipv4Addr, &SynFloodSignal> =
             signals.iter().map(|s| (s.src_ip, s)).collect();
 

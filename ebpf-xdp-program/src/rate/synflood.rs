@@ -73,7 +73,11 @@ pub fn compute_syn_rates_top_n(
         .filter(|r| r.pps > 0.0)
         .collect();
 
-    rates.sort_by(|a, b| b.pps.partial_cmp(&a.pps).unwrap_or(std::cmp::Ordering::Equal));
+    rates.sort_by(|a, b| {
+        b.pps
+            .partial_cmp(&a.pps)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     rates.truncate(top_n);
     rates
 }
@@ -87,7 +91,15 @@ mod tests {
     fn snapshot(t: Instant, entries: &[(u32, u64)]) -> SynCountersSnapshot {
         let counters = entries
             .iter()
-            .map(|&(ip, packets)| (ip, SynCounter { packets, bytes: packets * 60 }))
+            .map(|&(ip, packets)| {
+                (
+                    ip,
+                    SynCounter {
+                        packets,
+                        bytes: packets * 60,
+                    },
+                )
+            })
             .collect();
         SynCountersSnapshot {
             timestamp: t,
