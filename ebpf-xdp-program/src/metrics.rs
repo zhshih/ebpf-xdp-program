@@ -224,14 +224,10 @@ impl MetricsHandle {
         kind: AlertKind,
         lifecycle: AlertLifecycle,
     ) {
-        let lc_label = match lifecycle {
-            AlertLifecycle::Fired => "fired",
-            AlertLifecycle::Resolved => "resolved",
-        };
         metrics::counter!("xdp_alert_events_total",
             "proto" => proto.label(),
             "kind"  => kind.label(),
-            "lifecycle" => lc_label)
+            "lifecycle" => lifecycle.label())
         .increment(1);
     }
 
@@ -246,10 +242,7 @@ impl MetricsHandle {
 
     /// Called once per SYN-flood `AlertLifecycle` event. Aggregate only.
     pub fn record_synflood_event(&self, lifecycle: AlertLifecycle) {
-        let lc_label = match lifecycle {
-            AlertLifecycle::Fired => "fired",
-            AlertLifecycle::Resolved => "resolved",
-        };
-        metrics::counter!("xdp_synflood_alert_events_total", "lifecycle" => lc_label).increment(1);
+        metrics::counter!("xdp_synflood_alert_events_total", "lifecycle" => lifecycle.label())
+            .increment(1);
     }
 }

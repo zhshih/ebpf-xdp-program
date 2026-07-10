@@ -99,30 +99,22 @@ fn alert_slot_view(a: &AlertSlotSnapshot) -> AlertSlotView {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::time::Duration;
 
     use axum::{
         body::Body,
         http::{Request, StatusCode},
     };
     use ebpf_xdp_program_common::ProtoIndex;
-    use tokio::sync::RwLock;
     use tower::ServiceExt as _;
 
     use super::*;
     use crate::{
         alert::{AlertKind, AlertManager},
-        api::{self, ApiState},
+        api::{self, make_ctx},
         config::{default_alert_rules, default_baseline_estimator, default_emergency_detector},
         pipeline::AnomalyRunner,
     };
-
-    fn make_ctx() -> ApiContext {
-        ApiContext {
-            resolved_config: Arc::new(crate::config::default_resolved_config()),
-            dynamic: Arc::new(RwLock::new(ApiState::new())),
-        }
-    }
 
     #[tokio::test]
     async fn anomalies_empty_before_any_tick() {

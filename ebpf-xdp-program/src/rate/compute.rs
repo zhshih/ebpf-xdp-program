@@ -31,13 +31,16 @@ pub fn diff_stats(cur: &[TrafficCounters], prev: &[TrafficCounters]) -> Vec<Traf
 /// Computes per-protocol packet and byte rates (pps/bps) from two snapshots.
 ///
 /// Divides counter deltas by the elapsed time between snapshot timestamps.
-/// At BPF poll intervals (1s), `dt` is always positive; a near-zero `dt`
-/// would produce very large (but not NaN) values.
+/// Returns an empty vec for a non-positive `dt` (e.g. a clock adjustment)
+/// rather than dividing by ~0.
 pub fn compute_rates(
     prev: &TrafficCountersSnapshot,
     curr: &TrafficCountersSnapshot,
 ) -> Vec<ProtoRate> {
     let dt = curr.timestamp.duration_since(prev.timestamp).as_secs_f64();
+    if dt <= 0.0 {
+        return vec![];
+    }
 
     curr.stats
         .iter()
@@ -147,6 +150,22 @@ mod tests {
             "expected 50000 bps, got {}",
             tcp.bps
         );
+    }
+
+    #[test]
+    fn compute_rates_zero_dt_returns_empty() {
+        let stats = vec![counters(0, 0); ProtoIndex::COUNT as usize];
+        let t0 = Instant::now();
+        let prev = TrafficCountersSnapshot {
+            timestamp: t0,
+            stats: stats.clone(),
+        };
+        let curr = TrafficCountersSnapshot {
+            timestamp: t0,
+            stats,
+        };
+
+        assert!(compute_rates(&prev, &curr).is_empty());
     }
 
     #[test]

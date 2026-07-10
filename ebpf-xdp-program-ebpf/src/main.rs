@@ -6,7 +6,7 @@ use core::{mem, ptr};
 use aya_ebpf::{
     bindings::xdp_action,
     macros::{map, xdp},
-    maps::{LruHashMap, PerCpuArray},
+    maps::{LruPerCpuHashMap, PerCpuArray},
     programs::XdpContext,
 };
 use ebpf_xdp_program_common::{ProtoIndex, ProtoStats, SYN_TRACKER_MAX_ENTRIES, SynCounter};
@@ -22,10 +22,12 @@ static mut PROTO_STATS: PerCpuArray<ProtoStats> = PerCpuArray::<ProtoStats>::wit
 /// Per-source-IPv4 SYN/byte counters, keyed by the big-endian u32 form of
 /// the source address. LRU-evicting so inserts never fail regardless of how
 /// many distinct source IPs are seen — bounds kernel memory even under an
-/// attacker deliberately rotating source addresses.
+/// attacker deliberately rotating source addresses. Per-CPU (like
+/// `PROTO_STATS`) so concurrent updates from different RX queues never race
+/// on the same counter; user-space sums across CPUs when reading.
 #[map(name = "SYN_TRACKER")]
-static mut SYN_TRACKER: LruHashMap<u32, SynCounter> =
-    LruHashMap::<u32, SynCounter>::with_max_entries(SYN_TRACKER_MAX_ENTRIES, 0);
+static mut SYN_TRACKER: LruPerCpuHashMap<u32, SynCounter> =
+    LruPerCpuHashMap::<u32, SynCounter>::with_max_entries(SYN_TRACKER_MAX_ENTRIES, 0);
 
 #[inline(always)]
 fn packet_len(ctx: &XdpContext) -> u64 {

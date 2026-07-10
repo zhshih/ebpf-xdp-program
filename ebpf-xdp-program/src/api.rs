@@ -76,3 +76,13 @@ pub async fn serve(addr: SocketAddr, ctx: ApiContext) -> anyhow::Result<()> {
         .await
         .context("API server error")
 }
+
+/// Builds a fresh, all-default `ApiContext` for handler tests. Shared by
+/// every `api/*.rs` test module so each doesn't redefine it.
+#[cfg(test)]
+pub(crate) fn make_ctx() -> ApiContext {
+    ApiContext {
+        resolved_config: Arc::new(crate::config::default_resolved_config()),
+        dynamic: Arc::new(RwLock::new(ApiState::new())),
+    }
+}

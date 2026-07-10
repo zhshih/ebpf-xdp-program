@@ -18,8 +18,8 @@ unsafe impl aya::Pod for ProtoStats {}
 /// Cumulative SYN-packet and byte counters for one source IPv4 address.
 ///
 /// Shared between kernel-space (eBPF) and user-space via an
-/// `LruHashMap<u32, SynCounter>` BPF map named `SYN_TRACKER`, keyed by the
-/// big-endian u32 representation of the source address
+/// `LruPerCpuHashMap<u32, SynCounter>` BPF map named `SYN_TRACKER`, keyed by
+/// the big-endian u32 representation of the source address
 /// (`u32::from_be_bytes(ip.src_addr)` in the kernel, `Ipv4Addr::from(key)`
 /// in user-space — both treat the 4 bytes as big-endian octets).
 #[repr(C)]

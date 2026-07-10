@@ -9,7 +9,7 @@
 //! times — no separate user-space eviction/TTL sweep is needed.
 use std::{collections::HashMap, net::Ipv4Addr, time::Instant};
 
-use aya::maps::{HashMap as BpfHashMap, MapData};
+use aya::maps::{MapData, PerCpuHashMap};
 use ebpf_xdp_program_common::SynCounter;
 
 /// A full read of the live `SYN_TRACKER` map's contents at one point in time.
@@ -19,13 +19,26 @@ pub struct SynCountersSnapshot {
     pub counters: HashMap<u32, SynCounter>,
 }
 
+/// Reads every key's `SynCounter` and sums it across CPUs — `SYN_TRACKER` is
+/// per-CPU (see the kernel-side map doc) so concurrent updates from
+/// different RX queues never race on the same counter.
 pub fn read_syn_snapshot(
-    map: &BpfHashMap<&MapData, u32, SynCounter>,
+    map: &PerCpuHashMap<&MapData, u32, SynCounter>,
 ) -> anyhow::Result<SynCountersSnapshot> {
     let mut counters = HashMap::new();
     for entry in map.iter() {
-        let (key, counter) = entry?;
-        counters.insert(key, counter);
+        let (key, per_cpu) = entry?;
+        let summed = per_cpu.iter().fold(
+            SynCounter {
+                packets: 0,
+                bytes: 0,
+            },
+            |acc, c| SynCounter {
+                packets: acc.packets + c.packets,
+                bytes: acc.bytes + c.bytes,
+            },
+        );
+        counters.insert(key, summed);
     }
     Ok(SynCountersSnapshot {
         timestamp: Instant::now(),

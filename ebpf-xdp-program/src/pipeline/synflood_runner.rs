@@ -38,12 +38,8 @@ impl SynFloodRunner {
 
     pub fn tick(&mut self, current: &Option<SynCountersSnapshot>, metrics: &MetricsHandle) {
         let Some(curr) = current else { return };
-        let prev = match &self.prev_snapshot {
-            Some(p) => p.clone(),
-            None => {
-                self.prev_snapshot = Some(curr.clone());
-                return;
-            }
+        let Some(prev) = super::prime_or_diff(&mut self.prev_snapshot, current) else {
+            return;
         };
 
         let top_n = compute_syn_rates_top_n(&prev, curr, self.detector.top_n());
@@ -67,7 +63,6 @@ impl SynFloodRunner {
         }
 
         self.last_top_n = top_n;
-        self.prev_snapshot = Some(curr.clone());
     }
 
     /// Assembles a point-in-time view of SYN-flood state for the `/synflood`

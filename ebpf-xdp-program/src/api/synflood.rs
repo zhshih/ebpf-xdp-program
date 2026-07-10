@@ -54,28 +54,20 @@ fn to_view(snapshot: &SynFloodSnapshot) -> SynFloodResponse {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::Ipv4Addr, sync::Arc};
+    use std::net::Ipv4Addr;
 
     use axum::{
         body::Body,
         http::{Request, StatusCode},
     };
-    use tokio::sync::RwLock;
     use tower::ServiceExt as _;
 
     use super::*;
     use crate::{
         alert::SynFloodAlertSlotSnapshot,
-        api::{self, ApiState},
+        api::{self, make_ctx},
         rate::SynIpRate,
     };
-
-    fn make_ctx() -> ApiContext {
-        ApiContext {
-            resolved_config: Arc::new(crate::config::default_resolved_config()),
-            dynamic: Arc::new(RwLock::new(ApiState::new())),
-        }
-    }
 
     #[tokio::test]
     async fn synflood_empty_before_any_tick() {

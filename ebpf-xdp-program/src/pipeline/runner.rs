@@ -82,12 +82,8 @@ impl AnomalyRunner {
         self.baseline.advance();
 
         let Some(curr) = current else { return };
-        let prev = match &self.prev_counters {
-            Some(p) => p.clone(),
-            None => {
-                self.prev_counters = Some(curr.clone());
-                return;
-            }
+        let Some(prev) = super::prime_or_diff(&mut self.prev_counters, current) else {
+            return;
         };
 
         let rates = compute_rates(&prev, curr);
@@ -148,7 +144,6 @@ impl AnomalyRunner {
         }
 
         self.last_rates = rates;
-        self.prev_counters = Some(curr.clone());
     }
 
     /// Whether the EWMA baseline has produced at least one non-warming tick.
