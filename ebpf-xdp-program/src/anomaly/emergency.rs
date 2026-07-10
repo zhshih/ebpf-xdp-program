@@ -2,7 +2,7 @@ use ebpf_xdp_program_common::ProtoIndex;
 
 use crate::{
     alert::{AlertKind, AlertSignal},
-    anomaly::{AnomalyDetector, AnomalyLevel, DetectResult},
+    anomaly::{AnomalyDetector, AnomalyLevel, DetectResult, detector::ratio_confidence},
     rate::ProtoRate,
 };
 
@@ -47,17 +47,17 @@ impl AnomalyDetector for EmergencyDetector {
             let bps_exceeded = t.max_bps.is_some_and(|l| rate.bps > l);
 
             if pps_exceeded || bps_exceeded {
-                let pps_ratio = t
+                let pps_confidence = t
                     .max_pps
                     .filter(|&l| l > 0.0)
-                    .map(|l| rate.pps / l)
+                    .map(|l| ratio_confidence(rate.pps, l))
                     .unwrap_or(0.0);
-                let bps_ratio = t
+                let bps_confidence = t
                     .max_bps
                     .filter(|&l| l > 0.0)
-                    .map(|l| rate.bps / l)
+                    .map(|l| ratio_confidence(rate.bps, l))
                     .unwrap_or(0.0);
-                let confidence = (pps_ratio.max(bps_ratio) - 1.0).clamp(0.0, 1.0);
+                let confidence = pps_confidence.max(bps_confidence);
 
                 tracing::info!(
                     proto = ?rate.proto,

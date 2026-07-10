@@ -37,10 +37,9 @@ pub fn compute_rates(
     prev: &TrafficCountersSnapshot,
     curr: &TrafficCountersSnapshot,
 ) -> Vec<ProtoRate> {
-    let dt = curr.timestamp.duration_since(prev.timestamp).as_secs_f64();
-    if dt <= 0.0 {
+    let Some(dt) = super::dt_secs(prev.timestamp, curr.timestamp) else {
         return vec![];
-    }
+    };
 
     curr.stats
         .iter()
@@ -51,8 +50,8 @@ pub fn compute_rates(
 
             Some(ProtoRate {
                 proto,
-                pps: curr.packets.saturating_sub(prev.packets) as f64 / dt,
-                bps: curr.bytes.saturating_sub(prev.bytes) as f64 / dt,
+                pps: super::rate(curr.packets, prev.packets, dt),
+                bps: super::rate(curr.bytes, prev.bytes, dt),
             })
         })
         .collect()

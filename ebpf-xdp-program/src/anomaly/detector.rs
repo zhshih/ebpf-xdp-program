@@ -48,6 +48,12 @@ impl AnomalyLevel {
     }
 }
 
+/// Ratio-based confidence: `(observed / threshold - 1.0).clamp(0, 1)`, so
+/// 2x the threshold yields confidence 1.0. Caller must ensure `threshold > 0`.
+pub(crate) fn ratio_confidence(observed: f64, threshold: f64) -> f64 {
+    (observed / threshold - 1.0).clamp(0.0, 1.0)
+}
+
 /// Computed anomaly view for one protocol's rate sample: z-scores, discrete
 /// level, and a [0, 1] confidence derived from the worse of the two z-scores.
 #[derive(Debug, Clone, Copy)]

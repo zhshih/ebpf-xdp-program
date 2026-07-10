@@ -23,10 +23,7 @@ use tokio::signal;
 use crate::{
     alert::AlertManager,
     pipeline::{AnomalyRunner, SynFloodRunner},
-    rate::{
-        SynCountersSnapshot, TrafficCountersSnapshot, compute_mix, diff_stats, read_snapshot,
-        read_syn_snapshot,
-    },
+    rate::{TrafficCountersSnapshot, compute_mix, diff_stats, read_snapshot, read_syn_snapshot},
 };
 
 const STATS_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -74,6 +71,18 @@ fn spawn_api_server(port: u16, resolved_config: config::ResolvedConfig) -> api::
     });
     tracing::info!(port, "Axum API listening");
     ctx
+}
+
+/// Unwraps a BPF map read, logging and returning `None` on error so the
+/// caller's tick arm can `continue` instead of processing stale/absent data.
+fn read_or_skip<T>(result: anyhow::Result<T>, what: &str) -> Option<T> {
+    match result {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to read {what}; skipping tick");
+            None
+        }
+    }
 }
 
 #[tokio::main]
@@ -171,12 +180,8 @@ async fn main() -> anyhow::Result<()> {
     loop {
         tokio::select! {
             _ = stats_poll_tick.tick() => {
-                let curr = match read_snapshot(&proto_stats) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to read eBPF stats snapshot; skipping tick");
-                        continue;
-                    }
+                let Some(curr) = read_or_skip(read_snapshot(&proto_stats), "eBPF stats snapshot") else {
+                    continue;
                 };
                 current_counters = Some(curr.clone());
                 {
@@ -197,8 +202,7 @@ async fn main() -> anyhow::Result<()> {
             }
             _ = mix_aggregation_tick.tick() => {
                 let Some(curr) = &current_counters else { continue };
-                let Some(prev) = &prev_mix_counters else {
-                    prev_mix_counters = Some(curr.clone());
+                let Some(prev) = pipeline::prime_or_diff(&mut prev_mix_counters, &current_counters) else {
                     continue;
                 };
 
@@ -225,8 +229,6 @@ async fn main() -> anyhow::Result<()> {
                         100.0 - ipv6 as f64 * 100.0 / total_bytes as f64,
                     );
                 }
-
-                prev_mix_counters = Some(curr.clone());
             }
             _ = anomaly_eval_tick.tick() => {
                 anomaly_runner.tick(&current_counters, &metrics_handle);
@@ -235,14 +237,10 @@ async fn main() -> anyhow::Result<()> {
                 state.runner_snapshot = Some(anomaly_runner.snapshot(std::time::Instant::now()));
             }
             _ = synflood_eval_tick.tick() => {
-                let curr: Option<SynCountersSnapshot> = match read_syn_snapshot(&syn_tracker) {
-                    Ok(s) => Some(s),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to read SYN_TRACKER snapshot; skipping tick");
-                        continue;
-                    }
+                let Some(curr) = read_or_skip(read_syn_snapshot(&syn_tracker), "SYN_TRACKER snapshot") else {
+                    continue;
                 };
-                synflood_runner.tick(&curr, &metrics_handle);
+                synflood_runner.tick(&Some(curr), &metrics_handle);
                 let mut state = api_ctx.dynamic.write().await;
                 state.synflood_snapshot = Some(synflood_runner.snapshot());
             }

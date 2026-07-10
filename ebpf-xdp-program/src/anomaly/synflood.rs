@@ -1,6 +1,6 @@
 use std::net::Ipv4Addr;
 
-use crate::rate::SynIpRate;
+use crate::{anomaly::detector::ratio_confidence, rate::SynIpRate};
 
 /// A per-source-IP SYN-flood signal.
 ///
@@ -38,19 +38,16 @@ impl SynFloodDetector {
         self.top_n
     }
 
-    /// Confidence is `(pps / max_syn_pps - 1.0).clamp(0, 1)`, mirroring
-    /// `EmergencyDetector`'s ratio-based confidence — 2x threshold = 1.0.
+    /// Confidence is `(pps / max_syn_pps - 1.0).clamp(0, 1)`, sharing
+    /// `EmergencyDetector`'s ratio-based confidence formula — 2x threshold = 1.0.
     pub fn detect(&self, rates: &[SynIpRate]) -> Vec<SynFloodSignal> {
         rates
             .iter()
             .filter(|r| r.pps > self.max_syn_pps)
-            .map(|r| {
-                let ratio = r.pps / self.max_syn_pps.max(1.0);
-                SynFloodSignal {
-                    src_ip: r.src_ip,
-                    pps: r.pps,
-                    confidence: (ratio - 1.0).clamp(0.0, 1.0),
-                }
+            .map(|r| SynFloodSignal {
+                src_ip: r.src_ip,
+                pps: r.pps,
+                confidence: ratio_confidence(r.pps, self.max_syn_pps),
             })
             .collect()
     }
@@ -90,6 +87,24 @@ mod tests {
         assert!(
             (signals[0].confidence - 1.0).abs() < 1e-9,
             "confidence should be 1.0 at 2x threshold"
+        );
+    }
+
+    #[test]
+    fn synflood_confidence_matches_ratio_confidence_at_sub_one_threshold() {
+        // Regression pin: confidence must track the true ratio against the
+        // configured threshold, not an artificially floored denominator.
+        let det = SynFloodDetector::new(0.5, 10);
+        let signals = det.detect(&[rate(1, 1.0)]);
+        assert_eq!(signals.len(), 1);
+        assert!(
+            (signals[0].confidence - ratio_confidence(1.0, 0.5)).abs() < 1e-9,
+            "confidence should equal ratio_confidence(1.0, 0.5), got {}",
+            signals[0].confidence
+        );
+        assert!(
+            (signals[0].confidence - 1.0).abs() < 1e-9,
+            "1.0 pps against a 0.5 threshold is a 2x breach, confidence should be 1.0"
         );
     }
 

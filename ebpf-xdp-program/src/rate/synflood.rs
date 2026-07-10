@@ -67,20 +67,18 @@ pub fn compute_syn_rates_top_n(
     curr: &SynCountersSnapshot,
     top_n: usize,
 ) -> Vec<SynIpRate> {
-    let dt = curr.timestamp.duration_since(prev.timestamp).as_secs_f64();
-    if dt <= 0.0 {
+    let Some(dt) = super::dt_secs(prev.timestamp, curr.timestamp) else {
         return vec![];
-    }
+    };
 
     let mut rates: Vec<SynIpRate> = curr
         .counters
         .iter()
         .map(|(&key, c)| {
             let prev_packets = prev.counters.get(&key).map_or(0, |p| p.packets);
-            let delta = c.packets.saturating_sub(prev_packets);
             SynIpRate {
                 src_ip: Ipv4Addr::from(key),
-                pps: delta as f64 / dt,
+                pps: super::rate(c.packets, prev_packets, dt),
             }
         })
         .filter(|r| r.pps > 0.0)

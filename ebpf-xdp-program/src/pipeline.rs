@@ -18,7 +18,7 @@ pub use synflood_runner::{SynFloodRunner, SynFloodSnapshot};
 /// the caller skips processing for one tick. On every call after that, it
 /// returns the previous snapshot to diff against and rotates `*prev` to
 /// `current`.
-fn prime_or_diff<T: Clone>(prev: &mut Option<T>, current: &Option<T>) -> Option<T> {
+pub(crate) fn prime_or_diff<T: Clone>(prev: &mut Option<T>, current: &Option<T>) -> Option<T> {
     let curr = current.as_ref()?;
     match prev.take() {
         Some(p) => {
