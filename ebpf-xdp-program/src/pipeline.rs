@@ -5,11 +5,23 @@
 //! (EWMA Z-score and emergency thresholds), advances alert FSMs, updates the
 //! EWMA baseline (skipping protocols currently frozen by a hot alert), and
 //! emits Prometheus metrics.
+//!
+//! File layout follows the model.rs/view.rs/logic rule documented in
+//! `crate::alert`'s module doc. `pipeline` doesn't originate its own domain
+//! vocabulary — `AnomalyRunner::tick()`/`SynFloodRunner::tick()`, the
+//! *primary* methods, return `()` and only have side effects — it only
+//! orchestrates types already defined in `alert`/`anomaly`/`rate`, so it has
+//! no `model.rs`. It does have one `view.rs`: [`AlertSlotSnapshot`]/
+//! [`ProtoSnapshot`]/[`RunnerSnapshot`]/[`SynFloodSnapshot`] — see
+//! `view.rs`'s own doc comment for why — kept out of `runner.rs`/
+//! `synflood_runner.rs`, which hold only the managers themselves.
 mod runner;
 mod synflood_runner;
+mod view;
 
-pub use runner::{AlertSlotSnapshot, AnomalyRunner, ProtoSnapshot, RunnerSnapshot};
-pub use synflood_runner::{SynFloodRunner, SynFloodSnapshot};
+pub use runner::AnomalyRunner;
+pub use synflood_runner::SynFloodRunner;
+pub use view::{AlertSlotSnapshot, ProtoSnapshot, RunnerSnapshot, SynFloodSnapshot};
 
 /// Shared "prime or diff" step at the top of a runner's `tick()`.
 ///

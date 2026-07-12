@@ -10,14 +10,12 @@
 //! - [`EmergencyDetector`]: fires immediately when an absolute rate threshold is
 //!   exceeded, regardless of baseline state.
 //!
-//! File layout follows the same rule as `crate::alert`: a type belongs in
-//! `model.rs` only if it's shared domain vocabulary that crosses a
-//! producer/consumer or module boundary — one component produces it and a
-//! genuinely different component (a different detector/manager, or an
-//! external layer like `pipeline`/`api`/`metrics`) consumes it as an
-//! independently meaningful value. A type that exists purely to configure
-//! or expose one detector's own internal state is manager-scaffolding and
-//! stays colocated with that detector instead.
+//! File layout follows the model.rs/view.rs/logic rule documented in
+//! `crate::alert`'s module doc (a type belongs in `model.rs` only if it's
+//! the output of a component's *primary* method, consumed by a genuinely
+//! different component; `view.rs` is for a *secondary* introspection
+//! method's output; this module doesn't restate the rule, only its own
+//! specifics):
 //!
 //! - `model.rs` holds [`AnomalyLevel`]: it's a field on `AlertSignal`
 //!   (produced by both [`EwmaDetector`] and [`EmergencyDetector`], consumed
@@ -27,11 +25,9 @@
 //! - The [`AnomalyDetector`] trait — the shared contract implemented by both
 //!   `EwmaDetector` and `EmergencyDetector` — lives right here rather than
 //!   in its own file: it isn't a value either one produces or consumes, and
-//!   with no data left to accompany it (see M0's history: it used to share
-//!   a file with [`DetectResult`], which was removed once every detector
-//!   converged on returning `Vec<AlertSignal>` directly), a dedicated file
-//!   for one trait signature would be disproportionate — the same
-//!   reasoning that keeps `ratio_confidence` here instead of its own file.
+//!   a dedicated file for one trait signature would be disproportionate —
+//!   the same reasoning that keeps `ratio_confidence` here instead of its
+//!   own file.
 //! - `emergency_detector.rs` keeps [`EmergencyThreshold`] colocated with
 //!   [`EmergencyDetector`]: it's constructor config fed into `new()`, never
 //!   observed by anything else — the same category as `AlertRule` in
@@ -42,14 +38,13 @@
 //! (different input type, no baseline/warmup concept — see its own doc
 //! comment), so it lives entirely in its own file (`synflood_detector.rs`).
 //!
-//! [`AnomalyView`]/[`compute_anomaly_view`] live in `view.rs` instead,
-//! because nothing in `detect()` ever produces or consumes them — they're a
-//! `BaselineState` renderer used externally by the pipeline/API/metrics
-//! layers. `ratio_confidence` is defined right here rather than in any one
-//! detector's file, for the same reason `crate::pipeline::prime_or_diff` is
-//! defined in `pipeline.rs`: it's shared by exactly `EmergencyDetector`+
-//! `SynFloodDetector` — a different pair than `model.rs`'s — and is small
-//! enough that a dedicated file for one function would be disproportionate.
+//! [`AnomalyView`]/[`compute_anomaly_view`] live in `view.rs` instead — see
+//! that file's own doc comment for why. `ratio_confidence` is defined right
+//! here rather than in any one detector's file, for the same reason
+//! `crate::pipeline::prime_or_diff` is defined in `pipeline.rs`: it's shared
+//! by exactly `EmergencyDetector`+`SynFloodDetector` — a different pair than
+//! `model.rs`'s — and is small enough that a dedicated file for one function
+//! would be disproportionate.
 pub mod emergency_detector;
 pub mod ewma_detector;
 pub mod model;

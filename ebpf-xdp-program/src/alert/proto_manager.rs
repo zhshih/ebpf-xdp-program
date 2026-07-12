@@ -9,6 +9,7 @@ use crate::{
     alert::{
         model::{Alert, AlertEvent, AlertKind, AlertSignal},
         state::{AlertLifecycle, AlertState},
+        view::AlertMetricsSnapshot,
     },
     anomaly::AnomalyLevel,
 };
@@ -37,15 +38,6 @@ pub struct AlertRule {
     pub resolve_consecutive_threshold: u32,
     /// If true, the protocol's EWMA baseline is frozen while the alert is hot.
     pub freezes_baseline: bool,
-}
-
-/// Snapshot of a single alert slot for metrics export.
-pub struct AlertMetricsSnapshot {
-    pub proto: ProtoIndex,
-    pub kind: AlertKind,
-    pub phase_value: u8,
-    pub phase_label: &'static str,
-    pub consecutive_count: u32,
 }
 
 /// Drives per-`(proto, kind)` alert FSMs for all configured rules.
@@ -78,8 +70,8 @@ impl AlertManager {
         self.advance_states(&active, now)
     }
 
-    /// Returns a snapshot of all tracked alert states for Prometheus metric export.
-    pub fn metrics_snapshot(&self) -> Vec<AlertMetricsSnapshot> {
+    /// Returns a snapshot of all tracked alert states.
+    pub fn snapshot(&self) -> Vec<AlertMetricsSnapshot> {
         self.states
             .iter()
             .map(|(key, state)| AlertMetricsSnapshot {
@@ -375,5 +367,22 @@ mod tests {
             frozen.contains(&ProtoIndex::Tcp),
             "TCP should be frozen after firing"
         );
+    }
+
+    #[test]
+    fn manager_snapshot_reflects_fired_state() {
+        let mut mgr = AlertManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.0, 1)]);
+        mgr.evaluate(
+            &[spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 1.0)],
+            Instant::now(),
+        );
+
+        let snaps = mgr.snapshot();
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].proto, ProtoIndex::Tcp);
+        assert_eq!(snaps[0].kind, AlertKind::Spike);
+        assert_eq!(snaps[0].phase_value, 2, "Firing should be phase_value 2");
+        assert_eq!(snaps[0].phase_label, "firing");
+        assert_eq!(snaps[0].consecutive_count, 1);
     }
 }

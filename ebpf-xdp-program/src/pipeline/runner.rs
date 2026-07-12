@@ -3,43 +3,13 @@ use std::time::Instant;
 use ebpf_xdp_program_common::ProtoIndex;
 
 use crate::{
-    alert::{AlertEvent, AlertKind, AlertManager},
-    anomaly::{
-        AnomalyDetector, AnomalyView, EmergencyDetector, EwmaDetector, compute_anomaly_view,
-    },
+    alert::{AlertEvent, AlertManager},
+    anomaly::{AnomalyDetector, EmergencyDetector, EwmaDetector, compute_anomaly_view},
     baseline::{BaselineState, EwmaEstimator},
     metrics::MetricsHandle,
+    pipeline::view::{AlertSlotSnapshot, ProtoSnapshot, RunnerSnapshot},
     rate::{ProtoRate, TrafficCountersSnapshot, compute_rates},
 };
-
-/// Point-in-time view of one protocol's alert FSM slot, for the `/anomalies` API.
-#[derive(Debug)]
-pub struct AlertSlotSnapshot {
-    pub kind: AlertKind,
-    pub phase_label: &'static str,
-    pub consecutive_count: u32,
-}
-
-/// Point-in-time view of one protocol's full anomaly/alert state.
-///
-/// `rate`/`anomaly` are `None` until the runner has processed at least two
-/// counter snapshots (the first tick only primes `prev_counters`).
-#[derive(Debug)]
-pub struct ProtoSnapshot {
-    pub proto: ProtoIndex,
-    pub rate: Option<ProtoRate>,
-    pub baseline: BaselineState,
-    pub anomaly: Option<AnomalyView>,
-    pub alerts: Vec<AlertSlotSnapshot>,
-    pub frozen: bool,
-}
-
-/// Point-in-time view of all per-protocol anomaly/alert state, assembled by
-/// [`AnomalyRunner::snapshot`] for the `/anomalies` API endpoint.
-#[derive(Debug)]
-pub struct RunnerSnapshot {
-    pub protos: Vec<ProtoSnapshot>,
-}
 
 pub struct AnomalyRunner {
     prev_counters: Option<TrafficCountersSnapshot>,
@@ -129,7 +99,7 @@ impl AnomalyRunner {
         metrics.update_rates(&rates);
         metrics.update_baseline(&self.baseline);
         metrics.update_anomaly(&rates, &self.baseline);
-        metrics.update_alerts(&self.alert_manager.metrics_snapshot(), &frozen);
+        metrics.update_alerts(&self.alert_manager.snapshot(), &frozen);
         for event in &events {
             metrics.record_alert_event(event.alert.proto, event.alert.kind, event.lifecycle);
         }
@@ -147,7 +117,7 @@ impl AnomalyRunner {
     /// or baseline, and is safe to call from a different task than `tick()`.
     pub fn snapshot(&self, now: Instant) -> RunnerSnapshot {
         let frozen = self.alert_manager.frozen_protos(now);
-        let alert_snapshots = self.alert_manager.metrics_snapshot();
+        let alert_snapshots = self.alert_manager.snapshot();
 
         let protos = (0..ProtoIndex::COUNT as usize)
             .filter_map(ProtoIndex::from_index)
@@ -378,6 +348,68 @@ mod tests {
         assert!(
             !runner.warmed_up(),
             "only the emergency detector fired; the EWMA baseline is still Warming"
+        );
+    }
+
+    /// Regression: `AnomalyRunner::snapshot()`'s `.alerts`/`.frozen` fields
+    /// were never asserted by any test after the model.rs/view.rs split
+    /// moved `AlertMetricsSnapshot` out of `proto_manager.rs` — this drives
+    /// a real fired, baseline-freezing alert through the runner and checks
+    /// the resulting `AlertSlotSnapshot` and `ProtoSnapshot.frozen`.
+    #[test]
+    fn runner_snapshot_reflects_fired_alert_and_frozen_state() {
+        use crate::{
+            anomaly::{EmergencyDetector, EmergencyThreshold},
+            baseline::EwmaEstimator,
+        };
+
+        // min_samples so high the baseline never becomes Ready within this test.
+        let estimator = EwmaEstimator::new(0.4, 1000, 1e-3, 0);
+        let emergency = EmergencyDetector::new(vec![EmergencyThreshold {
+            proto: ProtoIndex::Tcp,
+            max_pps: Some(1.0),
+            max_bps: None,
+        }]);
+        let emergency_rule = AlertRule {
+            kind: AlertKind::Emergency,
+            min_level: AnomalyLevel::Suspicious,
+            min_confidence: 0.0,
+            cooldown: Duration::ZERO,
+            consecutive_threshold: 1,
+            resolve_consecutive_threshold: 1,
+            freezes_baseline: true,
+        };
+        let mut runner = AnomalyRunner::new(
+            estimator,
+            emergency,
+            AlertManager::new(vec![emergency_rule]),
+        );
+
+        let t1 = Instant::now();
+        let t2 = t1 + Duration::from_secs(1);
+        runner.tick(
+            &Some(make_counter_snapshot(t1, 100, 10_000)),
+            &MetricsHandle,
+        ); // prime
+        runner.tick(
+            &Some(make_counter_snapshot(t2, 200, 20_000)),
+            &MetricsHandle,
+        ); // 100 pps > threshold, fires
+
+        let snapshot = runner.snapshot(t2);
+        let tcp = snapshot
+            .protos
+            .iter()
+            .find(|p| p.proto == ProtoIndex::Tcp)
+            .expect("TCP entry present");
+
+        assert_eq!(tcp.alerts.len(), 1, "expected one fired alert slot for TCP");
+        assert_eq!(tcp.alerts[0].kind, AlertKind::Emergency);
+        assert_eq!(tcp.alerts[0].phase_label, "firing");
+        assert_eq!(tcp.alerts[0].consecutive_count, 1);
+        assert!(
+            tcp.frozen,
+            "TCP should be frozen: rule has freezes_baseline=true and is hot"
         );
     }
 

@@ -1,17 +1,12 @@
 use std::time::Instant;
 
 use crate::{
-    alert::{SynFloodAlertManager, SynFloodAlertSlotSnapshot},
+    alert::SynFloodAlertManager,
     anomaly::SynFloodDetector,
     metrics::MetricsHandle,
+    pipeline::view::SynFloodSnapshot,
     rate::{SynCountersSnapshot, SynIpRate, compute_syn_rates_top_n},
 };
-
-/// Point-in-time view of SYN-flood state, for the `/synflood` API endpoint.
-pub struct SynFloodSnapshot {
-    pub top_offenders: Vec<SynIpRate>,
-    pub alerts: Vec<SynFloodAlertSlotSnapshot>,
-}
 
 /// Coordinates per-source-IP SYN-flood detection, mirroring
 /// [`crate::pipeline::AnomalyRunner`]'s tick/prime/snapshot shape but with
@@ -160,5 +155,7 @@ mod tests {
         let snapshot = runner.snapshot();
         assert_eq!(snapshot.alerts.len(), 1);
         assert_eq!(snapshot.alerts[0].phase_label, "firing");
+        assert_eq!(snapshot.alerts[0].consecutive_count, 1);
+        assert_eq!(snapshot.alerts[0].src_ip, Ipv4Addr::from(1));
     }
 }

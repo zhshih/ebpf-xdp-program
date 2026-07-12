@@ -10,12 +10,10 @@
 //! primitive itself — but keeps its own small, separately-bounded map.
 //!
 //! `SynFloodSignal`/`SynFloodAlert`/`SynFloodAlertEvent` live in
-//! `crate::alert::model` instead of here: they cross the
-//! `SynFloodDetector`→`SynFloodAlertManager` producer/consumer boundary, so
-//! they're shared domain vocabulary, not manager-private scaffolding. This
-//! file keeps only what's private to `SynFloodAlertManager` itself: its
-//! FSM/GC logic and [`SynFloodAlertSlotSnapshot`], a view shaped by this
-//! manager's own internal state and consumed by nothing else.
+//! `crate::alert::model`; [`SynFloodAlertSlotSnapshot`] lives in
+//! `crate::alert::view` (see `crate::alert`'s module doc for why). This file
+//! keeps only what's private to `SynFloodAlertManager` itself: its FSM/GC
+//! logic.
 use std::{
     collections::{HashMap, HashSet},
     net::Ipv4Addr,
@@ -25,14 +23,8 @@ use std::{
 use crate::alert::{
     model::{SynFloodAlert, SynFloodAlertEvent, SynFloodSignal},
     state::AlertState,
+    view::SynFloodAlertSlotSnapshot,
 };
-
-/// Point-in-time view of one IP's SYN-flood FSM slot, for the `/synflood` API.
-pub struct SynFloodAlertSlotSnapshot {
-    pub src_ip: Ipv4Addr,
-    pub phase_label: &'static str,
-    pub consecutive_count: u32,
-}
 
 /// Drives per-source-IP SYN-flood alert FSMs.
 ///

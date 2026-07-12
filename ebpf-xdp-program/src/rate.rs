@@ -5,9 +5,13 @@
 //! per-protocol deltas; [`compute_rates`] then normalises them into
 //! [`ProtoRate`] (pps/bps) values for use by the anomaly pipeline.
 //!
-//! File layout follows the same boundary-crossing rule as `crate::alert`/
-//! `crate::anomaly`/`crate::api`: a type belongs in `model.rs` only if it
-//! crosses a producer/consumer or module boundary. `model.rs` holds
+//! File layout follows the model.rs/view.rs/logic rule documented in
+//! `crate::alert`'s module doc. `rate` has no stateful manager objects of
+//! its own to have a *secondary* introspection method at all (`EwmaEstimator`
+//! lives in the `ewma-detector` crate) — every function here (`compute_rates`,
+//! `diff_stats`, `read_snapshot`, `compute_syn_rates_top_n`, ...) is a
+//! *primary* computation whose return value is the module's actual purpose,
+//! so `rate` has a `model.rs` but no `view.rs`. `model.rs` holds
 //! [`TrafficCounters`]/[`TrafficCountersSnapshot`]/[`ProtoRate`] and
 //! [`SynCountersSnapshot`]/[`SynIpRate`] — every one of them is produced
 //! here and consumed by a genuinely different component (`pipeline`,
