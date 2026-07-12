@@ -12,12 +12,7 @@ use std::{collections::HashMap, net::Ipv4Addr, time::Instant};
 use aya::maps::{MapData, PerCpuHashMap};
 use ebpf_xdp_program_common::SynCounter;
 
-/// A full read of the live `SYN_TRACKER` map's contents at one point in time.
-#[derive(Clone)]
-pub struct SynCountersSnapshot {
-    pub timestamp: Instant,
-    pub counters: HashMap<u32, SynCounter>,
-}
+use super::model::{SynCountersSnapshot, SynIpRate};
 
 /// Reads every key's `SynCounter` and sums it across CPUs — `SYN_TRACKER` is
 /// per-CPU (see the kernel-side map doc) so concurrent updates from
@@ -44,13 +39,6 @@ pub fn read_syn_snapshot(
         timestamp: Instant::now(),
         counters,
     })
-}
-
-/// One source IP's SYN rate for the interval between two snapshots.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SynIpRate {
-    pub src_ip: Ipv4Addr,
-    pub pps: f64,
 }
 
 /// Diffs two consecutive full snapshots and returns the `top_n` source IPs

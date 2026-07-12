@@ -31,3 +31,36 @@ pub(crate) fn prime_or_diff<T: Clone>(prev: &mut Option<T>, current: &Option<T>)
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prime_or_diff_no_current_is_noop() {
+        let mut prev: Option<i32> = None;
+        assert_eq!(prime_or_diff(&mut prev, &None), None);
+        assert_eq!(prev, None);
+
+        // Also a no-op when prev was already primed.
+        let mut prev = Some(1);
+        assert_eq!(prime_or_diff(&mut prev, &None), None);
+        assert_eq!(prev, Some(1));
+    }
+
+    #[test]
+    fn prime_or_diff_first_call_primes_and_returns_none() {
+        let mut prev: Option<i32> = None;
+        let result = prime_or_diff(&mut prev, &Some(5));
+        assert_eq!(result, None);
+        assert_eq!(prev, Some(5));
+    }
+
+    #[test]
+    fn prime_or_diff_second_call_returns_old_and_rotates() {
+        let mut prev = Some(5);
+        let result = prime_or_diff(&mut prev, &Some(9));
+        assert_eq!(result, Some(5));
+        assert_eq!(prev, Some(9));
+    }
+}

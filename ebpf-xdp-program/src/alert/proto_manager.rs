@@ -7,7 +7,7 @@ use ebpf_xdp_program_common::ProtoIndex;
 
 use crate::{
     alert::{
-        model::{Alert, AlertKind, AlertSignal},
+        model::{Alert, AlertEvent, AlertKind, AlertSignal},
         state::{AlertLifecycle, AlertState},
     },
     anomaly::AnomalyLevel,
@@ -37,12 +37,6 @@ pub struct AlertRule {
     pub resolve_consecutive_threshold: u32,
     /// If true, the protocol's EWMA baseline is frozen while the alert is hot.
     pub freezes_baseline: bool,
-}
-
-/// An alert that has undergone a lifecycle transition (fired or resolved).
-pub struct AlertEvent {
-    pub alert: Alert,
-    pub lifecycle: AlertLifecycle,
 }
 
 /// Snapshot of a single alert slot for metrics export.

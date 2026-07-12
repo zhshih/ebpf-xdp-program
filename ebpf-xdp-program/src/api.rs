@@ -4,6 +4,19 @@
 //! Runs concurrently with the main eBPF-stats/anomaly-eval loop as a separate
 //! tokio task. Never touches the eBPF/aya maps directly — it only reads
 //! shared, lock-protected state written by the main loop once per tick.
+//!
+//! File layout follows the same boundary-crossing rule as `crate::alert`/
+//! `crate::anomaly`: a type only needs a shared `model.rs` if a genuinely
+//! different component consumes it as an independently meaningful value.
+//! Every response/view type here ([`health::HealthResponse`],
+//! [`anomalies::AnomaliesResponse`]/`ProtoAnomalyView`/`AlertSlotView`,
+//! [`synflood::SynFloodResponse`]/`SynFloodOffenderView`) is a JSON-shaped,
+//! second-order rendering built and consumed by exactly one handler in its
+//! own file — none of them are read by anything else, so none of them cross
+//! a boundary. The types that *do* cross into this module
+//! ([`RunnerSnapshot`], [`SynFloodSnapshot`], [`ResolvedConfig`]) already
+//! live in their producing modules rather than being duplicated here —
+//! that's why `api` has no `model.rs` of its own.
 mod anomalies;
 mod config;
 mod health;

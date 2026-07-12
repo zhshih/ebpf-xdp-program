@@ -4,13 +4,25 @@
 //! from the BPF map. [`diff_stats`] converts two consecutive snapshots into
 //! per-protocol deltas; [`compute_rates`] then normalises them into
 //! [`ProtoRate`] (pps/bps) values for use by the anomaly pipeline.
+//!
+//! File layout follows the same boundary-crossing rule as `crate::alert`/
+//! `crate::anomaly`/`crate::api`: a type belongs in `model.rs` only if it
+//! crosses a producer/consumer or module boundary. `model.rs` holds
+//! [`TrafficCounters`]/[`TrafficCountersSnapshot`]/[`ProtoRate`] and
+//! [`SynCountersSnapshot`]/[`SynIpRate`] — every one of them is produced
+//! here and consumed by a genuinely different component (`pipeline`,
+//! `anomaly`, `metrics`, `api`; `ProtoRate` even crosses into the sibling
+//! `ewma-detector` crate). `compute.rs`/`synflood_compute.rs` hold only the
+//! logic that produces them, split by which BPF map shape they read: a
+//! fixed 5-entry `ProtoIndex` array (`compute.rs`) vs. an unbounded
+//! per-source-IP map (`synflood_compute.rs`, see its own doc comment).
 pub mod compute;
 pub mod model;
-pub mod synflood;
+pub mod synflood_compute;
 
 pub use compute::{compute_mix, compute_rates, diff_stats, read_snapshot};
-pub use model::{ProtoRate, TrafficCountersSnapshot};
-pub use synflood::{SynCountersSnapshot, SynIpRate, compute_syn_rates_top_n, read_syn_snapshot};
+pub use model::{ProtoRate, SynCountersSnapshot, SynIpRate, TrafficCountersSnapshot};
+pub use synflood_compute::{compute_syn_rates_top_n, read_syn_snapshot};
 
 /// Elapsed time between two snapshot timestamps, in seconds. `None` for a
 /// non-positive interval (e.g. a clock adjustment), so callers can bail out

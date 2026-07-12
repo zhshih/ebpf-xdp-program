@@ -3,21 +3,14 @@ use std::time::Instant;
 use ebpf_xdp_program_common::ProtoIndex;
 
 use crate::{
-    alert::{AlertEvent, AlertKind, AlertManager, AlertSignal},
+    alert::{AlertEvent, AlertKind, AlertManager},
     anomaly::{
-        AnomalyDetector, AnomalyView, DetectResult, EmergencyDetector, EwmaDetector,
-        compute_anomaly_view,
+        AnomalyDetector, AnomalyView, EmergencyDetector, EwmaDetector, compute_anomaly_view,
     },
     baseline::{BaselineState, EwmaEstimator},
     metrics::MetricsHandle,
     rate::{ProtoRate, TrafficCountersSnapshot, compute_rates},
 };
-
-enum PipelineOutcome {
-    WarmingUp,
-    NoSignals,
-    Events { events: Vec<AlertEvent> },
-}
 
 /// Point-in-time view of one protocol's alert FSM slot, for the `/anomalies` API.
 #[derive(Debug)]
@@ -88,8 +81,16 @@ impl AnomalyRunner {
 
         let rates = compute_rates(&prev, curr);
 
+        let any_ready = rates
+            .iter()
+            .any(|r| matches!(self.baseline.snapshot(r.proto), BaselineState::Ready { .. }));
+        if !self.warmed_up && any_ready {
+            self.warmed_up = true;
+            tracing::info!("baseline ready");
+        }
+
         let ewma_detector = EwmaDetector::new(&self.baseline);
-        let outcome = run_anomaly_pipeline(
+        let events = run_anomaly_pipeline(
             &rates,
             &ewma_detector,
             &self.emergency_detector,
@@ -107,22 +108,12 @@ impl AnomalyRunner {
             self.baseline.update(&unfrozen);
         }
 
-        if !self.warmed_up && !matches!(outcome, PipelineOutcome::WarmingUp) {
-            self.warmed_up = true;
-            tracing::info!("baseline ready");
+        if events.is_empty() {
+            tracing::info!(
+                baseline_ready = any_ready,
+                "no alert events generated during anomaly evaluation"
+            );
         }
-
-        let events = match outcome {
-            PipelineOutcome::WarmingUp => {
-                tracing::info!("baseline warming up");
-                vec![]
-            }
-            PipelineOutcome::NoSignals => {
-                tracing::info!("no alert signals generated during anomaly evaluation");
-                vec![]
-            }
-            PipelineOutcome::Events { events } => events,
-        };
 
         for event in &events {
             tracing::warn!(
@@ -196,33 +187,15 @@ fn run_anomaly_pipeline<E: AnomalyDetector, Em: AnomalyDetector>(
     ewma: &E,
     emergency: &Em,
     alert_manager: &mut AlertManager,
-) -> PipelineOutcome {
-    let results = [ewma.detect(rates), emergency.detect(rates)];
-
-    let any_warming = results.iter().any(|r| matches!(r, DetectResult::WarmingUp));
-    let all_signals: Vec<AlertSignal> = results
-        .into_iter()
-        .flat_map(|r| match r {
-            DetectResult::WarmingUp => vec![],
-            DetectResult::Signals(s) => s,
-        })
-        .collect();
+) -> Vec<AlertEvent> {
+    let mut all_signals = ewma.detect(rates);
+    all_signals.extend(emergency.detect(rates));
 
     if !all_signals.is_empty() {
         tracing::info!("generated {} total signals", all_signals.len());
     }
 
-    let events = alert_manager.evaluate(&all_signals, Instant::now());
-
-    if events.is_empty() {
-        if any_warming {
-            PipelineOutcome::WarmingUp
-        } else {
-            PipelineOutcome::NoSignals
-        }
-    } else {
-        PipelineOutcome::Events { events }
-    }
+    alert_manager.evaluate(&all_signals, Instant::now())
 }
 
 #[cfg(test)]
@@ -234,21 +207,14 @@ mod tests {
     use super::*;
     use crate::{
         alert::{AlertKind, AlertRule, AlertSignal},
-        anomaly::{AnomalyDetector, AnomalyLevel, DetectResult},
+        anomaly::{AnomalyDetector, AnomalyLevel},
         rate::ProtoRate,
     };
 
-    struct WarmingDetector;
-    impl AnomalyDetector for WarmingDetector {
-        fn detect(&self, _: &[ProtoRate]) -> DetectResult {
-            DetectResult::WarmingUp
-        }
-    }
-
     struct SignalDetector(Vec<AlertSignal>);
     impl AnomalyDetector for SignalDetector {
-        fn detect(&self, _: &[ProtoRate]) -> DetectResult {
-            DetectResult::Signals(self.0.clone())
+        fn detect(&self, _: &[ProtoRate]) -> Vec<AlertSignal> {
+            self.0.clone()
         }
     }
 
@@ -323,13 +289,12 @@ mod tests {
         let snap2 = make_counter_snapshot(t2, 200, 20_000);
         runner.tick(&Some(snap1), &MetricsHandle); // prime prev_counters
         runner.tick(&Some(snap2), &MetricsHandle); // runs compute_rates → pipeline → baseline.update
-        // baseline is Warming after 1 sample → WarmingUp outcome, no panic
+        // baseline is Warming after 1 sample → no signals, no panic
     }
 
-    /// `warmed_up()` flips `true` once the EWMA detector stops reporting
-    /// `WarmingUp` for at least one protocol — exercised through real
-    /// `tick()` calls rather than constructing `PipelineOutcome` directly,
-    /// since no existing test drove `AnomalyRunner.warmed_up()` to `true`.
+    /// `warmed_up()` flips `true` once any polled protocol's EWMA baseline
+    /// reports `Ready` — exercised through real `tick()` calls rather than
+    /// checking the internal `any_ready` computation directly.
     #[test]
     fn runner_warms_up_after_enough_ticks() {
         use crate::baseline::EwmaEstimator;
@@ -365,6 +330,54 @@ mod tests {
         assert!(
             runner.warmed_up(),
             "expected baseline to warm up after 6 ticks with min_samples=3"
+        );
+    }
+
+    /// Regression: `warmed_up` must reflect the EWMA baseline's own
+    /// readiness, not "did any alert event fire." A prior implementation
+    /// derived `warmed_up` from whether `run_anomaly_pipeline` returned any
+    /// events, so an emergency-only firing (baseline still `Warming`) would
+    /// incorrectly flip it `true`.
+    #[test]
+    fn runner_warmed_up_stays_false_when_only_emergency_fires_during_warmup() {
+        use crate::anomaly::{EmergencyDetector, EmergencyThreshold};
+
+        // min_samples so high the baseline never becomes Ready within this test.
+        let estimator = EwmaEstimator::new(0.4, 1000, 1e-3, 0);
+        let emergency = EmergencyDetector::new(vec![EmergencyThreshold {
+            proto: ProtoIndex::Tcp,
+            max_pps: Some(1.0),
+            max_bps: None,
+        }]);
+        let emergency_rule = AlertRule {
+            kind: AlertKind::Emergency,
+            min_level: AnomalyLevel::Suspicious,
+            min_confidence: 0.0,
+            cooldown: Duration::ZERO,
+            consecutive_threshold: 1,
+            resolve_consecutive_threshold: 1,
+            freezes_baseline: false,
+        };
+        let mut runner = AnomalyRunner::new(
+            estimator,
+            emergency,
+            AlertManager::new(vec![emergency_rule]),
+        );
+
+        let t1 = Instant::now();
+        let t2 = t1 + Duration::from_secs(1);
+        runner.tick(
+            &Some(make_counter_snapshot(t1, 100, 10_000)),
+            &MetricsHandle,
+        ); // prime
+        runner.tick(
+            &Some(make_counter_snapshot(t2, 200, 20_000)),
+            &MetricsHandle,
+        ); // 100 pps > threshold, fires
+
+        assert!(
+            !runner.warmed_up(),
+            "only the emergency detector fired; the EWMA baseline is still Warming"
         );
     }
 
@@ -414,19 +427,11 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_warming_up() {
-        let det = WarmingDetector;
-        let mut mgr = AlertManager::new(vec![immediate_spike_rule()]);
-        let outcome = run_anomaly_pipeline(&make_rates(), &det, &det, &mut mgr);
-        assert!(matches!(outcome, PipelineOutcome::WarmingUp));
-    }
-
-    #[test]
     fn pipeline_no_signals_when_ready() {
         let det = SignalDetector(vec![]);
         let mut mgr = AlertManager::new(vec![immediate_spike_rule()]);
-        let outcome = run_anomaly_pipeline(&make_rates(), &det, &det, &mut mgr);
-        assert!(matches!(outcome, PipelineOutcome::NoSignals));
+        let events = run_anomaly_pipeline(&make_rates(), &det, &det, &mut mgr);
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -440,8 +445,8 @@ mod tests {
         let det = SignalDetector(vec![signal]);
         let empty = SignalDetector(vec![]);
         let mut mgr = AlertManager::new(vec![immediate_spike_rule()]);
-        let outcome = run_anomaly_pipeline(&make_rates(), &det, &empty, &mut mgr);
-        assert!(matches!(outcome, PipelineOutcome::Events { .. }));
+        let events = run_anomaly_pipeline(&make_rates(), &det, &empty, &mut mgr);
+        assert!(!events.is_empty());
     }
 
     /// End-to-end: warm up a real EWMA baseline, then inject a massive traffic spike.
@@ -495,11 +500,8 @@ mod tests {
             bps: 10_000_000.0,
         }];
 
-        let outcome = run_anomaly_pipeline(&spike, &ewma_detector, &emergency, &mut alert_manager);
+        let events = run_anomaly_pipeline(&spike, &ewma_detector, &emergency, &mut alert_manager);
 
-        let PipelineOutcome::Events { events } = outcome else {
-            panic!("expected PipelineOutcome::Events, got a non-event outcome");
-        };
         assert!(!events.is_empty(), "expected at least one alert event");
         assert!(matches!(events[0].lifecycle, AlertLifecycle::Fired));
         assert_eq!(events[0].alert.proto, ProtoIndex::Tcp);

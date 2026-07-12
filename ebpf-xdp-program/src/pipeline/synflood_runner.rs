@@ -48,9 +48,9 @@ impl SynFloodRunner {
 
         for event in &events {
             tracing::warn!(
-                src_ip = %event.src_ip,
-                pps = event.pps,
-                confidence = event.confidence,
+                src_ip = %event.alert.src_ip,
+                pps = event.alert.pps,
+                confidence = event.alert.confidence,
                 lifecycle = ?event.lifecycle,
                 "syn-flood alert event"
             );

@@ -8,24 +8,24 @@
 //! one bucket (destroying the "which IP" information this exists to
 //! surface). [`SynFloodAlertManager`] reuses [`AlertState`] — the FSM
 //! primitive itself — but keeps its own small, separately-bounded map.
+//!
+//! `SynFloodSignal`/`SynFloodAlert`/`SynFloodAlertEvent` live in
+//! `crate::alert::model` instead of here: they cross the
+//! `SynFloodDetector`→`SynFloodAlertManager` producer/consumer boundary, so
+//! they're shared domain vocabulary, not manager-private scaffolding. This
+//! file keeps only what's private to `SynFloodAlertManager` itself: its
+//! FSM/GC logic and [`SynFloodAlertSlotSnapshot`], a view shaped by this
+//! manager's own internal state and consumed by nothing else.
 use std::{
     collections::{HashMap, HashSet},
     net::Ipv4Addr,
     time::{Duration, Instant},
 };
 
-use crate::{
-    alert::state::{AlertLifecycle, AlertState},
-    anomaly::SynFloodSignal,
+use crate::alert::{
+    model::{SynFloodAlert, SynFloodAlertEvent, SynFloodSignal},
+    state::AlertState,
 };
-
-/// A SYN-flood alert lifecycle transition for one source IP.
-pub struct SynFloodAlertEvent {
-    pub src_ip: Ipv4Addr,
-    pub pps: f64,
-    pub confidence: f64,
-    pub lifecycle: AlertLifecycle,
-}
 
 /// Point-in-time view of one IP's SYN-flood FSM slot, for the `/synflood` API.
 pub struct SynFloodAlertSlotSnapshot {
@@ -89,9 +89,11 @@ impl SynFloodAlertManager {
                 self.resolve_consecutive_threshold,
             ) {
                 events.push(SynFloodAlertEvent {
-                    src_ip: ip,
-                    pps: signal.map_or(0.0, |s| s.pps),
-                    confidence: signal.map_or(0.0, |s| s.confidence),
+                    alert: SynFloodAlert {
+                        src_ip: ip,
+                        pps: signal.map_or(0.0, |s| s.pps),
+                        confidence: signal.map_or(0.0, |s| s.confidence),
+                    },
                     lifecycle,
                 });
             }
@@ -123,6 +125,7 @@ impl SynFloodAlertManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alert::AlertLifecycle;
 
     const NO_COOLDOWN: Duration = Duration::ZERO;
 
@@ -147,7 +150,7 @@ mod tests {
         assert!(e2.is_empty());
         assert_eq!(e3.len(), 1);
         assert!(matches!(e3[0].lifecycle, AlertLifecycle::Fired));
-        assert_eq!(e3[0].src_ip, Ipv4Addr::from(1));
+        assert_eq!(e3[0].alert.src_ip, Ipv4Addr::from(1));
     }
 
     #[test]

@@ -1,18 +1,4 @@
-use std::net::Ipv4Addr;
-
-use crate::{anomaly::detector::ratio_confidence, rate::SynIpRate};
-
-/// A per-source-IP SYN-flood signal.
-///
-/// Deliberately not [`crate::anomaly::AlertSignal`]: that type is keyed by
-/// `ProtoIndex`, which has nowhere to put an `Ipv4Addr` without collapsing
-/// distinct attacker IPs into one bucket.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SynFloodSignal {
-    pub src_ip: Ipv4Addr,
-    pub pps: f64,
-    pub confidence: f64,
-}
+use crate::{alert::SynFloodSignal, anomaly::ratio_confidence, rate::SynIpRate};
 
 /// Stateless, threshold-based SYN-flood detector — mirrors
 /// [`crate::anomaly::EmergencyDetector`]'s shape (no warmup, no persistent
@@ -55,6 +41,8 @@ impl SynFloodDetector {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use super::*;
 
     fn rate(ip: u32, pps: f64) -> SynIpRate {
