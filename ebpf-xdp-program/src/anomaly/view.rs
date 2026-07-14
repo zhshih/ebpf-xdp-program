@@ -1,52 +1,15 @@
+//! `BaselineState`-to-view rendering, decoupled from the `AnomalyDetector`
+//! trait system.
+//!
+//! [`compute_anomaly_view`] is not called by any detector's `detect()` — it's
+//! used externally by `pipeline/runner.rs` (per-protocol snapshot assembly),
+//! `api/anomalies.rs`, and `metrics.rs` to independently derive a z-score
+//! view straight from a protocol's baseline. That's why it lives in its own
+//! file rather than alongside the `AnomalyDetector` trait: it has no
+//! producer/consumer relationship with `EwmaDetector`/`EmergencyDetector` at all.
 use ewma_detector::compute_proto_z_scores;
 
-use crate::{alert::AlertSignal, baseline::BaselineState, rate::ProtoRate};
-
-/// Outcome of a single anomaly detection pass.
-///
-/// `WarmingUp` means the baseline is not yet ready and no detection was performed.
-/// `Signals` contains zero or more anomaly signals (an empty vec means normal traffic).
-pub enum DetectResult {
-    WarmingUp,
-    Signals(Vec<AlertSignal>),
-}
-
-/// Abstraction over anomaly detection strategies.
-///
-/// Implementors examine a rate snapshot and return signals for any protocols
-/// whose traffic deviates from the expected pattern.
-pub trait AnomalyDetector {
-    fn detect(&self, rates: &[ProtoRate]) -> DetectResult;
-}
-
-/// Severity classification for a detected anomaly.
-///
-/// Variants are ordered: `Normal < Suspicious < Severe`, enabling comparison
-/// against [`AlertRule::min_level`](crate::alert::AlertRule).
-///
-/// Z-score thresholds: Normal < 3σ, Suspicious 3–6σ, Severe ≥ 6σ.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq)]
-pub enum AnomalyLevel {
-    Normal,
-    Suspicious,
-    Severe,
-}
-
-impl AnomalyLevel {
-    /// Returns `true` only for `Normal`; used to filter out non-anomalous signals.
-    pub fn is_normal(&self) -> bool {
-        matches!(self, AnomalyLevel::Normal)
-    }
-
-    /// Short lowercase label, mirroring `AlertKind::label()` / `ProtoIndex::label()`.
-    pub fn label(self) -> &'static str {
-        match self {
-            AnomalyLevel::Normal => "normal",
-            AnomalyLevel::Suspicious => "suspicious",
-            AnomalyLevel::Severe => "severe",
-        }
-    }
-}
+use crate::{anomaly::AnomalyLevel, baseline::BaselineState};
 
 /// Computed anomaly view for one protocol's rate sample: z-scores, discrete
 /// level, and a [0, 1] confidence derived from the worse of the two z-scores.
@@ -93,31 +56,6 @@ pub fn compute_anomaly_view(baseline: &BaselineState, pps: f64, bps: f64) -> Ano
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn anomaly_level_ordering() {
-        assert!(AnomalyLevel::Normal < AnomalyLevel::Suspicious);
-        assert!(AnomalyLevel::Suspicious < AnomalyLevel::Severe);
-        assert!(AnomalyLevel::Normal < AnomalyLevel::Severe);
-    }
-
-    #[test]
-    fn anomaly_level_is_normal() {
-        assert!(AnomalyLevel::Normal.is_normal());
-    }
-
-    #[test]
-    fn anomaly_level_is_not_normal() {
-        assert!(!AnomalyLevel::Suspicious.is_normal());
-        assert!(!AnomalyLevel::Severe.is_normal());
-    }
-
-    #[test]
-    fn anomaly_level_label_all_variants() {
-        assert_eq!(AnomalyLevel::Normal.label(), "normal");
-        assert_eq!(AnomalyLevel::Suspicious.label(), "suspicious");
-        assert_eq!(AnomalyLevel::Severe.label(), "severe");
-    }
 
     fn ready_baseline(
         pps_mean: f64,

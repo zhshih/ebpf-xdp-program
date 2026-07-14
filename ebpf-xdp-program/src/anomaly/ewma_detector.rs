@@ -2,7 +2,7 @@ use ewma_detector::compute_proto_z_scores;
 
 use crate::{
     alert::{AlertKind, AlertSignal},
-    anomaly::{AnomalyDetector, AnomalyLevel, DetectResult},
+    anomaly::{AnomalyDetector, AnomalyLevel},
     baseline::{Baseline, BaselineState},
     rate::ProtoRate,
 };
@@ -23,9 +23,8 @@ impl<'a, B: Baseline> EwmaDetector<'a, B> {
 }
 
 impl<'a, B: Baseline> AnomalyDetector for EwmaDetector<'a, B> {
-    fn detect(&self, rates: &[ProtoRate]) -> DetectResult {
+    fn detect(&self, rates: &[ProtoRate]) -> Vec<AlertSignal> {
         let mut signals = Vec::new();
-        let mut any_ready = false;
 
         for rate in rates {
             let baseline_state = self.baseline.snapshot(rate.proto);
@@ -34,7 +33,6 @@ impl<'a, B: Baseline> AnomalyDetector for EwmaDetector<'a, B> {
                 BaselineState::Ready {
                     baseline: proto_baseline,
                 } => {
-                    any_ready = true;
                     let (z_pps, z_bps) =
                         compute_proto_z_scores(&proto_baseline, rate.pps, rate.bps);
                     let level = match (anomaly_level_from_z(z_pps), anomaly_level_from_z(z_bps)) {
@@ -95,11 +93,7 @@ impl<'a, B: Baseline> AnomalyDetector for EwmaDetector<'a, B> {
             });
         }
 
-        if any_ready {
-            DetectResult::Signals(signals)
-        } else {
-            DetectResult::WarmingUp
-        }
+        signals
     }
 }
 
@@ -171,11 +165,11 @@ mod tests {
     // ── Tests ─────────────────────────────────────────────────────────────────
 
     #[test]
-    fn warming_up_returns_warming_up() {
+    fn warming_up_returns_no_signals() {
         let baseline = WarmingBaseline;
         let det = EwmaDetector::new(&baseline);
         let result = det.detect(&rates(vec![rate(ProtoIndex::Tcp, 100.0, 10_000.0)]));
-        assert!(matches!(result, DetectResult::WarmingUp));
+        assert!(result.is_empty());
     }
 
     #[test]
@@ -188,10 +182,7 @@ mod tests {
             stddev_bps: 1e-10,
         };
         let det = EwmaDetector::new(&baseline);
-        let result = det.detect(&rates(vec![rate(ProtoIndex::Tcp, 60.0, 0.0)]));
-        let DetectResult::Signals(signals) = result else {
-            panic!("expected DetectResult::Signals");
-        };
+        let signals = det.detect(&rates(vec![rate(ProtoIndex::Tcp, 60.0, 0.0)]));
         assert_eq!(signals.len(), 1);
         assert_eq!(signals[0].proto, ProtoIndex::Tcp);
         assert!(matches!(signals[0].kind, AlertKind::Drop));
@@ -214,10 +205,7 @@ mod tests {
             stddev_bps: 1e-10,
         };
         let det = EwmaDetector::new(&baseline);
-        let result = det.detect(&rates(vec![rate(ProtoIndex::Icmp, 0.0, 0.0)]));
-        let DetectResult::Signals(signals) = result else {
-            panic!("expected DetectResult::Signals");
-        };
+        let signals = det.detect(&rates(vec![rate(ProtoIndex::Icmp, 0.0, 0.0)]));
         assert_eq!(signals.len(), 1);
         assert!(matches!(signals[0].kind, AlertKind::Drop));
         assert!(matches!(signals[0].level, AnomalyLevel::Severe));
@@ -239,10 +227,7 @@ mod tests {
             stddev_bps: 1e-10,
         };
         let det = EwmaDetector::new(&baseline);
-        let result = det.detect(&rates(vec![rate(ProtoIndex::Udp, 150.0, 0.0)]));
-        let DetectResult::Signals(signals) = result else {
-            panic!("expected DetectResult::Signals");
-        };
+        let signals = det.detect(&rates(vec![rate(ProtoIndex::Udp, 150.0, 0.0)]));
         assert_eq!(signals.len(), 1);
         assert!(matches!(signals[0].kind, AlertKind::Spike));
         assert!(matches!(signals[0].level, AnomalyLevel::Suspicious));
@@ -259,10 +244,7 @@ mod tests {
             stddev_bps: 5.0,
         };
         let det = EwmaDetector::new(&baseline);
-        let result = det.detect(&rates(vec![rate(ProtoIndex::Tcp, 130.0, 200.0)]));
-        let DetectResult::Signals(signals) = result else {
-            panic!("expected DetectResult::Signals");
-        };
+        let signals = det.detect(&rates(vec![rate(ProtoIndex::Tcp, 130.0, 200.0)]));
         assert_eq!(signals.len(), 1);
         assert!(matches!(signals[0].kind, AlertKind::Spike));
         assert!(matches!(signals[0].level, AnomalyLevel::Severe));
@@ -284,7 +266,7 @@ mod tests {
             stddev_bps: 10.0,
         };
         let det = EwmaDetector::new(&baseline);
-        let result = det.detect(&rates(vec![rate(ProtoIndex::Tcp, 101.0, 101.0)]));
-        assert!(matches!(result, DetectResult::Signals(ref s) if s.is_empty()));
+        let signals = det.detect(&rates(vec![rate(ProtoIndex::Tcp, 101.0, 101.0)]));
+        assert!(signals.is_empty());
     }
 }

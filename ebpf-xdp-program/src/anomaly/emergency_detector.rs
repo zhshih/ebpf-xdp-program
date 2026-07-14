@@ -2,7 +2,7 @@ use ebpf_xdp_program_common::ProtoIndex;
 
 use crate::{
     alert::{AlertKind, AlertSignal},
-    anomaly::{AnomalyDetector, AnomalyLevel, DetectResult},
+    anomaly::{AnomalyDetector, AnomalyLevel, ratio_confidence},
     rate::ProtoRate,
 };
 
@@ -35,7 +35,7 @@ impl EmergencyDetector {
 }
 
 impl AnomalyDetector for EmergencyDetector {
-    fn detect(&self, rates: &[ProtoRate]) -> DetectResult {
+    fn detect(&self, rates: &[ProtoRate]) -> Vec<AlertSignal> {
         let mut signals = Vec::new();
 
         for rate in rates {
@@ -47,17 +47,17 @@ impl AnomalyDetector for EmergencyDetector {
             let bps_exceeded = t.max_bps.is_some_and(|l| rate.bps > l);
 
             if pps_exceeded || bps_exceeded {
-                let pps_ratio = t
+                let pps_confidence = t
                     .max_pps
                     .filter(|&l| l > 0.0)
-                    .map(|l| rate.pps / l)
+                    .map(|l| ratio_confidence(rate.pps, l))
                     .unwrap_or(0.0);
-                let bps_ratio = t
+                let bps_confidence = t
                     .max_bps
                     .filter(|&l| l > 0.0)
-                    .map(|l| rate.bps / l)
+                    .map(|l| ratio_confidence(rate.bps, l))
                     .unwrap_or(0.0);
-                let confidence = (pps_ratio.max(bps_ratio) - 1.0).clamp(0.0, 1.0);
+                let confidence = pps_confidence.max(bps_confidence);
 
                 tracing::info!(
                     proto = ?rate.proto,
@@ -78,7 +78,7 @@ impl AnomalyDetector for EmergencyDetector {
             }
         }
 
-        DetectResult::Signals(signals)
+        signals
     }
 }
 
@@ -94,8 +94,8 @@ mod tests {
     #[test]
     fn emergency_no_threshold_no_signal() {
         let det = EmergencyDetector::new(vec![]);
-        let result = det.detect(&[rate(ProtoIndex::Tcp, 1_000_000.0, 1e12)]);
-        assert!(matches!(result, DetectResult::Signals(ref s) if s.is_empty()));
+        let signals = det.detect(&[rate(ProtoIndex::Tcp, 1_000_000.0, 1e12)]);
+        assert!(signals.is_empty());
     }
 
     #[test]
@@ -105,8 +105,8 @@ mod tests {
             max_pps: Some(1000.0),
             max_bps: Some(100_000.0),
         }]);
-        let result = det.detect(&[rate(ProtoIndex::Tcp, 999.0, 99_999.0)]);
-        assert!(matches!(result, DetectResult::Signals(ref s) if s.is_empty()));
+        let signals = det.detect(&[rate(ProtoIndex::Tcp, 999.0, 99_999.0)]);
+        assert!(signals.is_empty());
     }
 
     #[test]
@@ -116,10 +116,7 @@ mod tests {
             max_pps: Some(1000.0),
             max_bps: None,
         }]);
-        let result = det.detect(&[rate(ProtoIndex::Tcp, 1001.0, 0.0)]);
-        let DetectResult::Signals(signals) = result else {
-            panic!("expected DetectResult::Signals");
-        };
+        let signals = det.detect(&[rate(ProtoIndex::Tcp, 1001.0, 0.0)]);
         assert_eq!(signals.len(), 1);
         assert_eq!(signals[0].proto, ProtoIndex::Tcp);
         assert_eq!(signals[0].kind, AlertKind::Emergency);
@@ -133,10 +130,7 @@ mod tests {
             max_pps: None,
             max_bps: Some(100_000.0),
         }]);
-        let result = det.detect(&[rate(ProtoIndex::Udp, 0.0, 100_001.0)]);
-        let DetectResult::Signals(signals) = result else {
-            panic!("expected DetectResult::Signals");
-        };
+        let signals = det.detect(&[rate(ProtoIndex::Udp, 0.0, 100_001.0)]);
         assert_eq!(signals.len(), 1);
         assert_eq!(signals[0].proto, ProtoIndex::Udp);
     }
@@ -149,10 +143,7 @@ mod tests {
             max_pps: Some(500.0),
             max_bps: None,
         }]);
-        let result = det.detect(&[rate(ProtoIndex::Icmp, 1000.0, 0.0)]);
-        let DetectResult::Signals(signals) = result else {
-            panic!("expected DetectResult::Signals");
-        };
+        let signals = det.detect(&[rate(ProtoIndex::Icmp, 1000.0, 0.0)]);
         assert!(
             (signals[0].confidence - 1.0).abs() < 1e-9,
             "confidence should be 1.0 at 2× threshold"

@@ -17,6 +17,16 @@ pub enum AlertLifecycle {
     Resolved,
 }
 
+impl AlertLifecycle {
+    /// Canonical string label for Prometheus metric export.
+    pub fn label(self) -> &'static str {
+        match self {
+            AlertLifecycle::Fired => "fired",
+            AlertLifecycle::Resolved => "resolved",
+        }
+    }
+}
+
 /// Single-slot FSM tracking the alert lifecycle for one `(proto, kind)` pair.
 ///
 /// State machine: `Inactive → Pending → Firing → Inactive`.

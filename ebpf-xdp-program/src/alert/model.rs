@@ -1,6 +1,8 @@
+use std::net::Ipv4Addr;
+
 use ebpf_xdp_program_common::ProtoIndex;
 
-use crate::anomaly::AnomalyLevel;
+use crate::{alert::state::AlertLifecycle, anomaly::AnomalyLevel};
 
 /// Classification of what kind of anomaly was detected.
 ///
@@ -38,6 +40,48 @@ pub struct AlertSignal {
     pub confidence: f64,
 }
 
+/// A finalized alert emitted by the alert manager on a `Fired` or `Resolved` transition.
+#[derive(Debug, Clone)]
+pub struct Alert {
+    pub proto: ProtoIndex,
+    pub kind: AlertKind,
+    pub level: AnomalyLevel,
+    pub confidence: f64,
+}
+
+/// An alert that has undergone a lifecycle transition (fired or resolved).
+pub struct AlertEvent {
+    pub alert: Alert,
+    pub lifecycle: AlertLifecycle,
+}
+
+/// A per-source-IP SYN-flood signal.
+///
+/// Deliberately not [`AlertSignal`]: that type is keyed by `ProtoIndex`,
+/// which has nowhere to put an `Ipv4Addr` without collapsing distinct
+/// attacker IPs into one bucket.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SynFloodSignal {
+    pub src_ip: Ipv4Addr,
+    pub pps: f64,
+    pub confidence: f64,
+}
+
+/// A finalized SYN-flood alert payload, mirroring [`Alert`] (minus
+/// `kind`/`level`, which have no SynFlood equivalent — this pipeline has no
+/// rule-based classification, just an absolute threshold).
+pub struct SynFloodAlert {
+    pub src_ip: Ipv4Addr,
+    pub pps: f64,
+    pub confidence: f64,
+}
+
+/// A SYN-flood alert lifecycle transition for one source IP.
+pub struct SynFloodAlertEvent {
+    pub alert: SynFloodAlert,
+    pub lifecycle: AlertLifecycle,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48,13 +92,4 @@ mod tests {
         assert_eq!(AlertKind::Drop.label(), "drop");
         assert_eq!(AlertKind::Emergency.label(), "emergency");
     }
-}
-
-/// A finalized alert emitted by the alert manager on a `Fired` or `Resolved` transition.
-#[derive(Debug, Clone)]
-pub struct Alert {
-    pub proto: ProtoIndex,
-    pub kind: AlertKind,
-    pub level: AnomalyLevel,
-    pub confidence: f64,
 }

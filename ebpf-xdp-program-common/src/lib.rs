@@ -15,6 +15,29 @@ pub struct ProtoStats {
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for ProtoStats {}
 
+/// Cumulative SYN-packet and byte counters for one source IPv4 address.
+///
+/// Shared between kernel-space (eBPF) and user-space via an
+/// `LruPerCpuHashMap<u32, SynCounter>` BPF map named `SYN_TRACKER`, keyed by
+/// the big-endian u32 representation of the source address
+/// (`u32::from_be_bytes(ip.src_addr)` in the kernel, `Ipv4Addr::from(key)`
+/// in user-space — both treat the 4 bytes as big-endian octets).
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct SynCounter {
+    pub packets: u64,
+    pub bytes: u64,
+}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for SynCounter {}
+
+/// Fixed capacity of the `SYN_TRACKER` LRU hash map. BPF map sizes are set
+/// at program-load time, so this is a compile-time constant shared by both
+/// crates, not a runtime config option like the alert thresholds in
+/// `ebpf-xdp-program`'s `config.rs`.
+pub const SYN_TRACKER_MAX_ENTRIES: u32 = 8192;
+
 /// Protocol bucket discriminant used as a BPF map index.
 ///
 /// Indices 0–4 are stable across the kernel/user boundary and must not be reordered.
@@ -112,6 +135,13 @@ mod tests {
     #[test]
     fn proto_stats_zeroed() {
         let s = ProtoStats::zeroed();
+        assert_eq!(s.packets, 0);
+        assert_eq!(s.bytes, 0);
+    }
+
+    #[test]
+    fn syn_counter_zeroed() {
+        let s = SynCounter::zeroed();
         assert_eq!(s.packets, 0);
         assert_eq!(s.bytes, 0);
     }

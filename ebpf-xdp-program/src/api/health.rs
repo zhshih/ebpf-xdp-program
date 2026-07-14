@@ -30,27 +30,13 @@ pub async fn handler(State(ctx): State<ApiContext>) -> Json<HealthResponse> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use axum::{
         body::Body,
         http::{Request, StatusCode},
     };
-    use tokio::sync::RwLock;
     use tower::ServiceExt as _;
 
-    use super::*;
-    use crate::{
-        api::{self, ApiState},
-        config::default_resolved_config,
-    };
-
-    fn make_ctx() -> ApiContext {
-        ApiContext {
-            resolved_config: Arc::new(default_resolved_config()),
-            dynamic: Arc::new(RwLock::new(ApiState::new())),
-        }
-    }
+    use crate::api::{self, make_ctx};
 
     #[tokio::test]
     async fn health_reports_ok_with_no_ticks_yet() {

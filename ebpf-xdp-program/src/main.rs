@@ -9,7 +9,7 @@ mod rate;
 
 use anyhow::Context as _;
 use aya::{
-    maps::PerCpuArray,
+    maps::{PerCpuArray, PerCpuHashMap},
     programs::{Xdp, XdpFlags},
 };
 use clap::Parser;
@@ -17,18 +17,24 @@ use clap::Parser;
 use log::warn;
 use std::time::Duration;
 
-use ebpf_xdp_program_common::{ProtoIndex, ProtoStats};
+use ebpf_xdp_program_common::{ProtoIndex, ProtoStats, SynCounter};
 use tokio::signal;
 
 use crate::{
     alert::AlertManager,
-    pipeline::AnomalyRunner,
-    rate::{TrafficCountersSnapshot, compute_mix, diff_stats, read_snapshot},
+    pipeline::{AnomalyRunner, SynFloodRunner},
+    rate::{TrafficCountersSnapshot, compute_mix, diff_stats, read_snapshot, read_syn_snapshot},
 };
 
 const STATS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MIX_AGG_INTERVAL: Duration = Duration::from_secs(5);
 const ANOMALY_EVAL_INTERVAL: Duration = Duration::from_secs(30);
+// Its own cadence rather than the 1s stats-poll interval: a near-full
+// SYN_TRACKER map read costs ~2x max_entries syscalls, which is wasteful at
+// 1s. Not the 30s anomaly-eval interval either — that's tuned for EWMA
+// baseline warmup, which SynFloodDetector (stateless/threshold-based) has
+// no use for.
+const SYNFLOOD_EVAL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -65,6 +71,18 @@ fn spawn_api_server(port: u16, resolved_config: config::ResolvedConfig) -> api::
     });
     tracing::info!(port, "Axum API listening");
     ctx
+}
+
+/// Unwraps a BPF map read, logging and returning `None` on error so the
+/// caller's tick arm can `continue` instead of processing stale/absent data.
+fn read_or_skip<T>(result: anyhow::Result<T>, what: &str) -> Option<T> {
+    match result {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to read {what}; skipping tick");
+            None
+        }
+    }
 }
 
 #[tokio::main]
@@ -130,18 +148,31 @@ async fn main() -> anyhow::Result<()> {
             .context("PROTO_STATS map not found")?,
     )?;
 
+    // The kernel side declares this as an `LruPerCpuHashMap`, but aya's
+    // user-space `PerCpuHashMap` wrapper reads back both `PerCpuHashMap` and
+    // `LruPerCpuHashMap` kernel map variants — there is no separate
+    // user-space `LruPerCpuHashMap` type.
+    let syn_tracker: PerCpuHashMap<_, u32, SynCounter> = PerCpuHashMap::try_from(
+        ebpf.map("SYN_TRACKER")
+            .context("SYN_TRACKER map not found")?,
+    )?;
+
     let mut stats_poll_tick = tokio::time::interval(STATS_POLL_INTERVAL);
     let mut mix_aggregation_tick = tokio::time::interval(MIX_AGG_INTERVAL);
     let mut anomaly_eval_tick = tokio::time::interval(ANOMALY_EVAL_INTERVAL);
+    let mut synflood_eval_tick = tokio::time::interval(SYNFLOOD_EVAL_INTERVAL);
 
     let mut current_counters: Option<TrafficCountersSnapshot> = None;
     let mut prev_mix_counters: Option<TrafficCountersSnapshot> = None;
-    let (estimator, emergency_detector, alert_rules, resolved_config) =
-        config::resolve_all(config_path.as_deref())?;
+    let (detectors, resolved_config) = config::resolve_all(config_path.as_deref())?;
     let mut anomaly_runner = AnomalyRunner::new(
-        estimator,
-        emergency_detector,
-        AlertManager::new(alert_rules),
+        detectors.baseline,
+        detectors.emergency,
+        AlertManager::new(detectors.alert_rules),
+    );
+    let mut synflood_runner = SynFloodRunner::new(
+        detectors.synflood_detector,
+        detectors.synflood_alert_manager,
     );
 
     let api_ctx = spawn_api_server(api_port, resolved_config);
@@ -149,12 +180,8 @@ async fn main() -> anyhow::Result<()> {
     loop {
         tokio::select! {
             _ = stats_poll_tick.tick() => {
-                let curr = match read_snapshot(&proto_stats) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to read eBPF stats snapshot; skipping tick");
-                        continue;
-                    }
+                let Some(curr) = read_or_skip(read_snapshot(&proto_stats), "eBPF stats snapshot") else {
+                    continue;
                 };
                 current_counters = Some(curr.clone());
                 {
@@ -175,8 +202,7 @@ async fn main() -> anyhow::Result<()> {
             }
             _ = mix_aggregation_tick.tick() => {
                 let Some(curr) = &current_counters else { continue };
-                let Some(prev) = &prev_mix_counters else {
-                    prev_mix_counters = Some(curr.clone());
+                let Some(prev) = pipeline::prime_or_diff(&mut prev_mix_counters, &current_counters) else {
                     continue;
                 };
 
@@ -203,14 +229,20 @@ async fn main() -> anyhow::Result<()> {
                         100.0 - ipv6 as f64 * 100.0 / total_bytes as f64,
                     );
                 }
-
-                prev_mix_counters = Some(curr.clone());
             }
             _ = anomaly_eval_tick.tick() => {
                 anomaly_runner.tick(&current_counters, &metrics_handle);
                 let mut state = api_ctx.dynamic.write().await;
                 state.warmed_up = anomaly_runner.warmed_up();
                 state.runner_snapshot = Some(anomaly_runner.snapshot(std::time::Instant::now()));
+            }
+            _ = synflood_eval_tick.tick() => {
+                let Some(curr) = read_or_skip(read_syn_snapshot(&syn_tracker), "SYN_TRACKER snapshot") else {
+                    continue;
+                };
+                synflood_runner.tick(&Some(curr), &metrics_handle);
+                let mut state = api_ctx.dynamic.write().await;
+                state.synflood_snapshot = Some(synflood_runner.snapshot());
             }
             _ = signal::ctrl_c() => {
                 tracing::info!("Exiting...");
