@@ -33,27 +33,30 @@
 //!   observed by anything else — the same category as `AlertRule` in
 //!   `crate::alert::proto_manager`.
 //!
-//! [`SynFloodDetector`] is a third, independent detector with no
-//! relationship to the two above: it doesn't implement `AnomalyDetector`
-//! (different input type, no baseline/warmup concept — see its own doc
-//! comment), so it lives entirely in its own file (`synflood_detector.rs`).
+//! [`SynFloodDetector`]/[`PortScanDetector`] are two further independent
+//! detectors with no relationship to the two above: neither implements
+//! `AnomalyDetector` (different input type, no baseline/warmup concept —
+//! see each one's own doc comment), so each lives entirely in its own file
+//! (`synflood_detector.rs`/`port_scan_detector.rs`).
 //!
 //! [`AnomalyView`]/[`compute_anomaly_view`] live in `view.rs` instead — see
 //! that file's own doc comment for why. `ratio_confidence` is defined right
 //! here rather than in any one detector's file, for the same reason
 //! `crate::pipeline::prime_or_diff` is defined in `pipeline.rs`: it's shared
-//! by exactly `EmergencyDetector`+`SynFloodDetector` — a different pair than
-//! `model.rs`'s — and is small enough that a dedicated file for one function
-//! would be disproportionate.
+//! by `EmergencyDetector`/`SynFloodDetector`/`PortScanDetector` — a
+//! different set than `model.rs`'s — and is small enough that a dedicated
+//! file for one function would be disproportionate.
 pub mod emergency_detector;
 pub mod ewma_detector;
 pub mod model;
+pub mod port_scan_detector;
 pub mod synflood_detector;
 pub mod view;
 
 pub use emergency_detector::{EmergencyDetector, EmergencyThreshold};
 pub use ewma_detector::EwmaDetector;
 pub use model::AnomalyLevel;
+pub use port_scan_detector::PortScanDetector;
 pub use synflood_detector::SynFloodDetector;
 pub use view::{AnomalyView, compute_anomaly_view};
 
