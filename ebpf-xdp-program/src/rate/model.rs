@@ -1,6 +1,6 @@
 use std::{collections::HashMap, net::Ipv4Addr, time::Instant};
 
-use ebpf_xdp_program_common::SynCounter;
+use ebpf_xdp_program_common::{PortScanKey, PortTouch, SynCounter};
 pub use ewma_detector::ProtoRate;
 
 /// Raw cumulative packet and byte counters for one protocol bucket.
@@ -34,4 +34,21 @@ pub struct SynCountersSnapshot {
 pub struct SynIpRate {
     pub src_ip: Ipv4Addr,
     pub pps: f64,
+}
+
+/// A full read of the live `PORT_SCAN_TRACKER` map's contents at one point
+/// in time, plus the `CLOCK_MONOTONIC` timestamp it was read at — see
+/// `rate::port_scan_compute`'s module doc for why the two are comparable.
+#[derive(Clone)]
+pub struct PortScanCountersSnapshot {
+    pub now_ns: u64,
+    pub touches: HashMap<PortScanKey, PortTouch>,
+}
+
+/// One source IP's distinct-destination-port count within the current
+/// detection window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortScanIpBreadth {
+    pub src_ip: Ipv4Addr,
+    pub distinct_ports: u32,
 }
