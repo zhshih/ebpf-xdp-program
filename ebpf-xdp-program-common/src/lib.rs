@@ -38,6 +38,54 @@ unsafe impl aya::Pod for SynCounter {}
 /// `ebpf-xdp-program`'s `config.rs`.
 pub const SYN_TRACKER_MAX_ENTRIES: u32 = 8192;
 
+/// Compound key for the `PORT_SCAN_TRACKER` map, one entry per distinct
+/// (source IP, destination port) pair touched by a bare TCP SYN.
+///
+/// Same byte-order convention as `SynCounter`'s key: `src_addr` is
+/// big-endian, `dst_port` is host-order. `_pad` keeps the derived
+/// `Hash`/`Eq` from seeing uninitialized padding bytes — construct via
+/// `new()`, not a struct literal.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Pod, Zeroable)]
+pub struct PortScanKey {
+    pub src_addr: u32,
+    pub dst_port: u16,
+    pub _pad: u16,
+}
+
+impl PortScanKey {
+    pub fn new(src_addr: u32, dst_port: u16) -> Self {
+        Self {
+            src_addr,
+            dst_port,
+            _pad: 0,
+        }
+    }
+}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for PortScanKey {}
+
+/// Last-touch timestamp for one `PortScanKey`, from `bpf_ktime_get_ns()`.
+///
+/// Always overwritten, never incremented, so — unlike `SynCounter` —
+/// there's no read-modify-write race across CPUs and no need for a
+/// per-CPU map.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct PortTouch {
+    pub last_seen_ns: u64,
+}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for PortTouch {}
+
+/// Fixed capacity of the `PORT_SCAN_TRACKER` LRU hash map.
+///
+/// Larger than `SYN_TRACKER_MAX_ENTRIES` since this key space is
+/// (IP × port), not just IP.
+pub const PORT_SCAN_TRACKER_MAX_ENTRIES: u32 = 16384;
+
 /// Protocol bucket discriminant used as a BPF map index.
 ///
 /// Indices 0–4 are stable across the kernel/user boundary and must not be reordered.
@@ -144,5 +192,30 @@ mod tests {
         let s = SynCounter::zeroed();
         assert_eq!(s.packets, 0);
         assert_eq!(s.bytes, 0);
+    }
+
+    #[test]
+    fn port_touch_zeroed() {
+        let t = PortTouch::zeroed();
+        assert_eq!(t.last_seen_ns, 0);
+    }
+
+    #[test]
+    fn port_scan_key_new_zeroes_pad() {
+        let k = PortScanKey::new(0x0102_0304, 443);
+        assert_eq!(k.src_addr, 0x0102_0304);
+        assert_eq!(k.dst_port, 443);
+        assert_eq!(k._pad, 0);
+    }
+
+    #[test]
+    fn port_scan_key_equality_ignores_construction_path() {
+        let a = PortScanKey::new(1, 80);
+        let b = PortScanKey {
+            src_addr: 1,
+            dst_port: 80,
+            _pad: 0,
+        };
+        assert_eq!(a, b);
     }
 }
