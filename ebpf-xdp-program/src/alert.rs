@@ -27,33 +27,39 @@
 //!   `EwmaDetector`/`EmergencyDetector` in `crate::anomaly`, consumed by
 //!   [`AlertManager`] here), [`AlertEvent`] (produced by [`AlertManager`],
 //!   consumed by `pipeline`/`metrics` outside this module), and the
-//!   SynFlood equivalents `SynFloodSignal`/`SynFloodAlert`/
-//!   `SynFloodAlertEvent`, which cross the same
-//!   `SynFloodDetector`→`SynFloodAlertManager` boundary.
-//! - `view.rs` holds [`AlertMetricsSnapshot`] and [`SynFloodAlertSlotSnapshot`] —
-//!   see `view.rs`'s own doc comment for which method produces each and why.
+//!   SynFlood/PortScan equivalents `SynFloodSignal`/`SynFloodAlert`/
+//!   `SynFloodAlertEvent` and `PortScanSignal`/`PortScanAlert`/
+//!   `PortScanAlertEvent`, which cross the analogous detector→manager
+//!   boundaries.
+//! - `view.rs` holds [`AlertMetricsSnapshot`], [`SynFloodAlertSlotSnapshot`],
+//!   and [`PortScanAlertSlotSnapshot`] — see `view.rs`'s own doc comment for
+//!   which method produces each and why.
 //! - `proto_manager.rs` holds what's private to the Proto+`AlertKind`-keyed
 //!   FSM: the private `AlertKey`, [`AlertRule`] (constructor config, never
 //!   observed by anything but the manager it configures), and
 //!   [`AlertManager`] itself. Its name stays as `proto_manager.rs` rather
 //!   than folding into a `manager.rs` — it's accurately scoped to this one
-//!   generic, Proto-keyed manager, distinct from the IP-keyed SynFlood
-//!   manager below.
+//!   generic, Proto-keyed manager, distinct from the IP-keyed SynFlood/
+//!   PortScan managers below.
 //! - `synflood_manager.rs` holds what's private to the IP-keyed FSM:
 //!   [`SynFloodAlertManager`] itself. Kept in its own file rather than
 //!   folded into `proto_manager.rs` because `AlertKey`'s `ProtoIndex` has
 //!   nowhere to put an `Ipv4Addr` without widening it and rippling into
 //!   `frozen_protos()` and every existing Spike/Drop/Emergency test.
+//! - `port_scan_manager.rs` holds [`PortScanAlertManager`], for the same
+//!   reason `synflood_manager.rs` stays separate (see above).
 //! - `state.rs` holds `AlertLifecycle`/`AlertState`, the FSM primitive
-//!   shared by both managers.
+//!   shared by all three managers.
 pub mod model;
+pub mod port_scan_manager;
 pub mod proto_manager;
 mod state;
 pub mod synflood_manager;
 pub mod view;
 
-pub use model::{AlertEvent, AlertKind, AlertSignal, SynFloodSignal};
+pub use model::{AlertEvent, AlertKind, AlertSignal, PortScanSignal, SynFloodSignal};
+pub use port_scan_manager::PortScanAlertManager;
 pub use proto_manager::{AlertManager, AlertRule};
 pub use state::AlertLifecycle;
 pub use synflood_manager::SynFloodAlertManager;
-pub use view::{AlertMetricsSnapshot, SynFloodAlertSlotSnapshot};
+pub use view::{AlertMetricsSnapshot, PortScanAlertSlotSnapshot, SynFloodAlertSlotSnapshot};

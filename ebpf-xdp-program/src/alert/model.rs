@@ -82,6 +82,30 @@ pub struct SynFloodAlertEvent {
     pub lifecycle: AlertLifecycle,
 }
 
+/// A per-source-IP port-scan signal.
+///
+/// Deliberately not [`AlertSignal`], for the same reason [`SynFloodSignal`]
+/// isn't: keyed by `Ipv4Addr`, which `ProtoIndex` has nowhere to put.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PortScanSignal {
+    pub src_ip: Ipv4Addr,
+    pub distinct_ports: u32,
+    pub confidence: f64,
+}
+
+/// A finalized port-scan alert payload, mirroring [`SynFloodAlert`].
+pub struct PortScanAlert {
+    pub src_ip: Ipv4Addr,
+    pub distinct_ports: u32,
+    pub confidence: f64,
+}
+
+/// A port-scan alert lifecycle transition for one source IP.
+pub struct PortScanAlertEvent {
+    pub alert: PortScanAlert,
+    pub lifecycle: AlertLifecycle,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
