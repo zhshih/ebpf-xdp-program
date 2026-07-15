@@ -33,7 +33,8 @@ impl PortScanRunner {
     pub fn tick(&mut self, current: &Option<PortScanCountersSnapshot>, metrics: &MetricsHandle) {
         let Some(curr) = current else { return };
 
-        let top_n = compute_port_scan_breadth(curr, self.detector.window_ns(), self.detector.top_n());
+        let top_n =
+            compute_port_scan_breadth(curr, self.detector.window_ns(), self.detector.top_n());
         let signals = self.detector.detect(&top_n);
         let events = self.alert_manager.evaluate(&signals, Instant::now());
 
@@ -76,7 +77,9 @@ mod tests {
     fn snap(now_ns: u64, entries: &[(u32, u16, u64)]) -> PortScanCountersSnapshot {
         let touches = entries
             .iter()
-            .map(|&(ip, port, last_seen_ns)| (PortScanKey::new(ip, port), PortTouch { last_seen_ns }))
+            .map(|&(ip, port, last_seen_ns)| {
+                (PortScanKey::new(ip, port), PortTouch { last_seen_ns })
+            })
             .collect();
         PortScanCountersSnapshot { now_ns, touches }
     }
@@ -110,7 +113,11 @@ mod tests {
         let mut runner = make_runner(2, 10);
         let s = snap(
             1_000_000_000,
-            &[(1, 80, 999_000_000), (1, 443, 999_000_000), (1, 22, 999_000_000)],
+            &[
+                (1, 80, 999_000_000),
+                (1, 443, 999_000_000),
+                (1, 22, 999_000_000),
+            ],
         );
         runner.tick(&Some(s), &MetricsHandle);
 
@@ -142,7 +149,11 @@ mod tests {
         let mut runner = make_runner(2, 10);
         let s = snap(
             1_000_000_000,
-            &[(1, 80, 999_000_000), (1, 443, 999_000_000), (1, 22, 999_000_000)],
+            &[
+                (1, 80, 999_000_000),
+                (1, 443, 999_000_000),
+                (1, 22, 999_000_000),
+            ],
         );
         runner.tick(&Some(s), &MetricsHandle);
 

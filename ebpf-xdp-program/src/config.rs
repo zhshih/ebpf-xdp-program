@@ -5,7 +5,9 @@ use ebpf_xdp_program_common::ProtoIndex;
 
 use crate::{
     alert::{AlertKind, AlertRule, PortScanAlertManager, SynFloodAlertManager},
-    anomaly::{AnomalyLevel, EmergencyDetector, EmergencyThreshold, PortScanDetector, SynFloodDetector},
+    anomaly::{
+        AnomalyLevel, EmergencyDetector, EmergencyThreshold, PortScanDetector, SynFloodDetector,
+    },
     baseline::EwmaEstimator,
 };
 

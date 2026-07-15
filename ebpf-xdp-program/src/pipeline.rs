@@ -24,7 +24,9 @@ mod view;
 pub use port_scan_runner::PortScanRunner;
 pub use runner::AnomalyRunner;
 pub use synflood_runner::SynFloodRunner;
-pub use view::{AlertSlotSnapshot, PortScanSnapshot, ProtoSnapshot, RunnerSnapshot, SynFloodSnapshot};
+pub use view::{
+    AlertSlotSnapshot, PortScanSnapshot, ProtoSnapshot, RunnerSnapshot, SynFloodSnapshot,
+};
 
 /// Shared "prime or diff" step at the top of a runner's `tick()`.
 ///

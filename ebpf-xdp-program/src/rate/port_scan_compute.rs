@@ -72,7 +72,7 @@ pub fn compute_port_scan_breadth(
         })
         .collect();
 
-    breadths.sort_by(|a, b| b.distinct_ports.cmp(&a.distinct_ports));
+    breadths.sort_by_key(|b| std::cmp::Reverse(b.distinct_ports));
     breadths.truncate(top_n);
     breadths
 }
@@ -84,7 +84,9 @@ mod tests {
     fn snapshot(now_ns: u64, entries: &[(u32, u16, u64)]) -> PortScanCountersSnapshot {
         let touches = entries
             .iter()
-            .map(|&(ip, port, last_seen_ns)| (PortScanKey::new(ip, port), PortTouch { last_seen_ns }))
+            .map(|&(ip, port, last_seen_ns)| {
+                (PortScanKey::new(ip, port), PortTouch { last_seen_ns })
+            })
             .collect();
         PortScanCountersSnapshot { now_ns, touches }
     }

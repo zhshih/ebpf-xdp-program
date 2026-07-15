@@ -195,13 +195,12 @@ fn try_ebpf_xdp_program(ctx: XdpContext) -> Result<u32, u32> {
             }
         }
 
-        if l3.proto == IpProto::Tcp {
-            if let Some(tcp) = parse_tcp_info(&ctx, l3.ip_hdr_len) {
-                if tcp.is_syn {
-                    record_syn(l3.src_addr, bytes);
-                    record_port_touch(PortScanKey::new(l3.src_addr, tcp.dst_port));
-                }
-            }
+        if l3.proto == IpProto::Tcp
+            && let Some(tcp) = parse_tcp_info(&ctx, l3.ip_hdr_len)
+            && tcp.is_syn
+        {
+            record_syn(l3.src_addr, bytes);
+            record_port_touch(PortScanKey::new(l3.src_addr, tcp.dst_port));
         }
     }
 
