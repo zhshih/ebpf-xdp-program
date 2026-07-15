@@ -65,10 +65,8 @@ use crate::{alert::AlertSignal, rate::ProtoRate};
 /// Abstraction over anomaly detection strategies.
 ///
 /// Implementors examine a rate snapshot and return signals for any protocols
-/// whose traffic deviates from the expected pattern. An empty vec means no
-/// anomaly was found; it does not distinguish that from "not enough data
-/// yet" — callers that care about baseline readiness ask the baseline
-/// directly (see `AnomalyRunner::tick`) rather than inferring it here.
+/// whose traffic deviates from the expected pattern — see this module's own
+/// doc for what an empty result does and doesn't mean.
 pub trait AnomalyDetector {
     fn detect(&self, rates: &[ProtoRate]) -> Vec<AlertSignal>;
 }

@@ -1,9 +1,9 @@
 //! Per-source-IP port-scan alerting.
 //!
 //! Deliberately parallel to, not folded into, [`crate::alert::AlertManager`]
-//! — same rationale as [`crate::alert::SynFloodAlertManager`] (see its own
-//! doc comment). [`PortScanAlertManager`] reuses [`AlertState`] but keeps
-//! its own small, separately-bounded map.
+//! — same rationale as [`crate::alert::SynFloodAlertManager`].
+//! [`PortScanAlertManager`] reuses [`AlertState`] but keeps its own small,
+//! separately-bounded map (see its own doc comment for why that's bounded).
 //!
 //! `PortScanSignal`/`PortScanAlert`/`PortScanAlertEvent` live in
 //! `crate::alert::model`; [`PortScanAlertSlotSnapshot`] lives in
@@ -45,8 +45,7 @@ impl PortScanAlertManager {
         }
     }
 
-    /// Filters/advances FSMs against `signals`, then garbage-collects any
-    /// entry that's neither in `signals` nor still hot.
+    /// Same behavior as [`crate::alert::SynFloodAlertManager::evaluate`].
     pub fn evaluate(
         &mut self,
         signals: &[PortScanSignal],

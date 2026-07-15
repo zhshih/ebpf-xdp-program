@@ -58,6 +58,7 @@ pub fn compute_rates(
 }
 
 /// Returns per-protocol packet share as a percentage of total packets in `delta`.
+///
 /// Returns an empty vec if total packets is zero.
 pub fn compute_mix(delta: &[TrafficCounters]) -> Vec<(ProtoIndex, f64)> {
     let total = delta.iter().map(|s| s.packets).sum::<u64>();

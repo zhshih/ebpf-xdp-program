@@ -482,8 +482,7 @@ mod tests {
     }
 
     /// End-to-end: warm up a real EWMA baseline, then inject a massive traffic spike.
-    ///
-    /// This exercises the full path: `EwmaEstimator` → `EwmaDetector` → Z-score
+    /// Exercises the full path: `EwmaEstimator` → `EwmaDetector` → Z-score
     /// computation → `AlertManager` FSM → `AlertEvent::Fired`. No mocked detectors.
     #[test]
     fn end_to_end_spike_fires_after_baseline_warms_up() {

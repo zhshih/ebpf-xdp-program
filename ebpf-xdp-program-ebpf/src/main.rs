@@ -34,9 +34,8 @@ static mut SYN_TRACKER: LruPerCpuHashMap<u32, SynCounter> =
     LruPerCpuHashMap::<u32, SynCounter>::with_max_entries(SYN_TRACKER_MAX_ENTRIES, 0);
 
 /// Last-touch timestamps for (source IP, destination port) pairs seen in a
-/// bare TCP SYN. Non-per-CPU, unlike `SYN_TRACKER` — `record_port_touch`
-/// only ever overwrites a timestamp rather than incrementing a counter, so
-/// there's no cross-CPU read-modify-write race to guard against.
+/// bare TCP SYN. Non-per-CPU, unlike `SYN_TRACKER` — see [`PortTouch`]'s doc
+/// for why.
 #[map(name = "PORT_SCAN_TRACKER")]
 static mut PORT_SCAN_TRACKER: LruHashMap<PortScanKey, PortTouch> =
     LruHashMap::<PortScanKey, PortTouch>::with_max_entries(PORT_SCAN_TRACKER_MAX_ENTRIES, 0);
@@ -98,8 +97,6 @@ fn parse_ipv4hdr(ctx: &XdpContext) -> Option<L3Info> {
     let ip = ptr_at::<Ipv4Hdr>(ctx, offset)?;
 
     let proto = unsafe { (*ip).proto };
-    // Network-order octets; `from_be_bytes` keeps the numeric value
-    // consistent with how user-space reconstructs `Ipv4Addr::from(u32)`.
     let src_addr = unsafe { u32::from_be_bytes((*ip).src_addr) };
     let ip_hdr_len = unsafe { (*ip).ihl() } as usize;
     Some(L3Info {
@@ -109,6 +106,8 @@ fn parse_ipv4hdr(ctx: &XdpContext) -> Option<L3Info> {
     })
 }
 
+/// Parsed fields from a `TcpHdr`, for SYN-flood and port-scan detection.
+///
 /// `is_syn`: true only for a bare SYN (SYN=1, ACK=0) — the half-open-
 /// connection-exhaustion signature a SYN flood relies on. SYN-ACK responses
 /// are deliberately excluded: counting them would also flag hosts that are
@@ -144,11 +143,9 @@ fn record_syn(src_addr: u32, bytes: u64) {
             (*counter).bytes += bytes;
         } else {
             let fresh = SynCounter { packets: 1, bytes };
-            // Best-effort: with an LRU map `insert` practically never fails
-            // (the kernel evicts an existing entry instead of returning
-            // ENOSPC). Even if it did, a lost counter update must never
-            // propagate into a dropped/aborted packet — this program stays
-            // observe-only.
+            // Best-effort: even if insert fails, a lost counter update must
+            // never propagate into a dropped/aborted packet — this program
+            // stays observe-only.
             let _ = (*ptr::addr_of_mut!(SYN_TRACKER)).insert(src_addr, fresh, 0);
         }
     }

@@ -32,10 +32,11 @@ pub struct SynCounter {
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for SynCounter {}
 
-/// Fixed capacity of the `SYN_TRACKER` LRU hash map. BPF map sizes are set
-/// at program-load time, so this is a compile-time constant shared by both
-/// crates, not a runtime config option like the alert thresholds in
-/// `ebpf-xdp-program`'s `config.rs`.
+/// Fixed capacity of the `SYN_TRACKER` LRU hash map.
+///
+/// BPF map sizes are set at program-load time, so this is a compile-time
+/// constant shared by both crates, not a runtime config option like the
+/// alert thresholds in `ebpf-xdp-program`'s `config.rs`.
 pub const SYN_TRACKER_MAX_ENTRIES: u32 = 8192;
 
 /// Compound key for the `PORT_SCAN_TRACKER` map, one entry per distinct
@@ -89,7 +90,6 @@ pub const PORT_SCAN_TRACKER_MAX_ENTRIES: u32 = 16384;
 /// Protocol bucket discriminant used as a BPF map index.
 ///
 /// Indices 0–4 are stable across the kernel/user boundary and must not be reordered.
-/// `COUNT = 5` is the total number of tracked protocols.
 #[repr(u32)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ProtoIndex {

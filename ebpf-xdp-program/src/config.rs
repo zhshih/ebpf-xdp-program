@@ -249,7 +249,6 @@ fn build_alert_rules(rules: Vec<AlertRuleConfig>) -> anyhow::Result<Vec<AlertRul
 }
 
 /// Projects a constructed [`AlertRule`] into its resolved JSON view.
-///
 /// `AlertRule`'s fields are all public, so this can run on any `Vec<AlertRule>`
 /// (built from a TOML override or a compiled-in default) after the fact —
 /// there's exactly one place where an `AlertRule`'s values exist, and this is
@@ -305,9 +304,7 @@ fn resolve_emergency_thresholds(
 
 /// Builds the SYN-flood detector and alert manager from optional overrides,
 /// returning both domain objects and the resolved scalars used to build
-/// them — same rationale as `build_estimator`/`build_emergency_detector`:
-/// neither domain type exposes getters, so this is the only point where
-/// those scalars are observable.
+/// them — same rationale as `build_estimator` (see there).
 fn build_synflood(
     cfg: Option<SynFloodConfig>,
 ) -> (
@@ -344,8 +341,7 @@ fn build_synflood(
 
 /// Builds the port-scan detector and alert manager from optional overrides,
 /// returning both domain objects and the resolved scalars used to build
-/// them — same rationale as `build_synflood`: neither domain type exposes
-/// getters, so this is the only point where those scalars are observable.
+/// them — same rationale as `build_synflood` (see there).
 fn build_port_scan(
     cfg: Option<PortScanConfig>,
 ) -> (
@@ -459,9 +455,10 @@ pub fn load_config(path: &std::path::Path) -> anyhow::Result<(ResolvedDetectors,
 }
 
 /// Resolves the effective configuration from an optional TOML file path,
-/// falling back to compiled-in defaults when `config_path` is `None`. Single
-/// entry point so callers (just `main.rs`) don't need to know about the
-/// TOML-vs-defaults branching.
+/// falling back to compiled-in defaults when `config_path` is `None`.
+///
+/// Single entry point so callers (just `main.rs`) don't need to know about
+/// the TOML-vs-defaults branching.
 pub fn resolve_all(
     config_path: Option<&std::path::Path>,
 ) -> anyhow::Result<(ResolvedDetectors, ResolvedConfig)> {

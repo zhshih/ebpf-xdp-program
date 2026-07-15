@@ -41,9 +41,6 @@ pub struct AlertRule {
 }
 
 /// Drives per-`(proto, kind)` alert FSMs for all configured rules.
-///
-/// On each call to [`evaluate`](Self::evaluate), signals are filtered against
-/// rule criteria, FSMs are advanced, and any phase-transition events are returned.
 pub struct AlertManager {
     rules: Vec<AlertRule>,
     states: HashMap<AlertKey, AlertState>,
@@ -70,7 +67,6 @@ impl AlertManager {
         self.advance_states(&active, now)
     }
 
-    /// Returns a snapshot of all tracked alert states.
     pub fn snapshot(&self) -> Vec<AlertMetricsSnapshot> {
         self.states
             .iter()

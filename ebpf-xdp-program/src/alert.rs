@@ -42,10 +42,8 @@
 //!   generic, Proto-keyed manager, distinct from the IP-keyed SynFlood/
 //!   PortScan managers below.
 //! - `synflood_manager.rs` holds what's private to the IP-keyed FSM:
-//!   [`SynFloodAlertManager`] itself. Kept in its own file rather than
-//!   folded into `proto_manager.rs` because `AlertKey`'s `ProtoIndex` has
-//!   nowhere to put an `Ipv4Addr` without widening it and rippling into
-//!   `frozen_protos()` and every existing Spike/Drop/Emergency test.
+//!   [`SynFloodAlertManager`] itself. Kept separate from `proto_manager.rs`
+//!   rather than widening `AlertKey` — see its own module doc for why.
 //! - `port_scan_manager.rs` holds [`PortScanAlertManager`], for the same
 //!   reason `synflood_manager.rs` stays separate (see above).
 //! - `state.rs` holds `AlertLifecycle`/`AlertState`, the FSM primitive

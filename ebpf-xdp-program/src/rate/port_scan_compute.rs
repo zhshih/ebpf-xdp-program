@@ -30,8 +30,6 @@ fn now_ktime_ns() -> u64 {
 }
 
 /// Reads every `(src_ip, dst_port)` key's last-touch timestamp.
-/// `PORT_SCAN_TRACKER` is a plain map, so unlike `read_syn_snapshot` there's
-/// no per-CPU summing.
 pub fn read_port_scan_snapshot(
     map: &BpfHashMap<&MapData, PortScanKey, PortTouch>,
 ) -> anyhow::Result<PortScanCountersSnapshot> {

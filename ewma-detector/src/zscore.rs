@@ -1,7 +1,7 @@
 // NOTE:
 // These functions are pure math utilities.
 // They must NOT be used directly for anomaly decisions.
-// Use Ewma::robust_z_score instead.
+// Use compute_proto_z_scores instead.
 use crate::estimator::ProtoBaseline;
 
 const EPSILON: f64 = 1e-9;

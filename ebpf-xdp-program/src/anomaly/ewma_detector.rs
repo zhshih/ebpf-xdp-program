@@ -16,7 +16,6 @@ pub struct EwmaDetector<'a, B: Baseline> {
 }
 
 impl<'a, B: Baseline> EwmaDetector<'a, B> {
-    /// Creates a detector backed by the provided baseline reference.
     pub fn new(baseline: &'a B) -> Self {
         Self { baseline }
     }
