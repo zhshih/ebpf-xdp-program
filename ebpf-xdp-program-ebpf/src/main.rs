@@ -5,11 +5,15 @@ use core::{mem, ptr};
 
 use aya_ebpf::{
     bindings::xdp_action,
+    helpers::bpf_ktime_get_ns,
     macros::{map, xdp},
-    maps::{LruPerCpuHashMap, PerCpuArray},
+    maps::{LruHashMap, LruPerCpuHashMap, PerCpuArray},
     programs::XdpContext,
 };
-use ebpf_xdp_program_common::{ProtoIndex, ProtoStats, SYN_TRACKER_MAX_ENTRIES, SynCounter};
+use ebpf_xdp_program_common::{
+    PORT_SCAN_TRACKER_MAX_ENTRIES, PortScanKey, PortTouch, ProtoIndex, ProtoStats,
+    SYN_TRACKER_MAX_ENTRIES, SynCounter,
+};
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpProto, Ipv4Hdr, Ipv6Hdr},
@@ -28,6 +32,14 @@ static mut PROTO_STATS: PerCpuArray<ProtoStats> = PerCpuArray::<ProtoStats>::wit
 #[map(name = "SYN_TRACKER")]
 static mut SYN_TRACKER: LruPerCpuHashMap<u32, SynCounter> =
     LruPerCpuHashMap::<u32, SynCounter>::with_max_entries(SYN_TRACKER_MAX_ENTRIES, 0);
+
+/// Last-touch timestamps for (source IP, destination port) pairs seen in a
+/// bare TCP SYN. Non-per-CPU, unlike `SYN_TRACKER` — `record_port_touch`
+/// only ever overwrites a timestamp rather than incrementing a counter, so
+/// there's no cross-CPU read-modify-write race to guard against.
+#[map(name = "PORT_SCAN_TRACKER")]
+static mut PORT_SCAN_TRACKER: LruHashMap<PortScanKey, PortTouch> =
+    LruHashMap::<PortScanKey, PortTouch>::with_max_entries(PORT_SCAN_TRACKER_MAX_ENTRIES, 0);
 
 #[inline(always)]
 fn packet_len(ctx: &XdpContext) -> u64 {
@@ -97,20 +109,31 @@ fn parse_ipv4hdr(ctx: &XdpContext) -> Option<L3Info> {
     })
 }
 
-/// Returns `Some(true)` for a bare SYN (SYN=1, ACK=0) — the half-open-
-/// connection-exhaustion signature a SYN flood relies on — `Some(false)`
-/// for any other flag combination, `None` if the TCP header doesn't fit.
+/// `is_syn`: true only for a bare SYN (SYN=1, ACK=0) — the half-open-
+/// connection-exhaustion signature a SYN flood relies on. SYN-ACK responses
+/// are deliberately excluded: counting them would also flag hosts that are
+/// merely the target of return traffic from a reflection/amplification
+/// attack aimed elsewhere, a different attack shape than what this detector
+/// targets.
 ///
-/// SYN-ACK responses are deliberately excluded: counting them would also
-/// flag hosts that are merely the target of return traffic from a
-/// reflection/amplification attack aimed elsewhere, a different attack
-/// shape than what this detector targets.
+/// `dst_port`: host-order destination port, for port-scan detection.
+/// `TcpHdr::dest` has no accessor (unlike `UdpHdr::dst_port()`), so it's
+/// converted here from raw network-order bytes.
+struct TcpInfo {
+    is_syn: bool,
+    dst_port: u16,
+}
+
+/// One `TcpHdr` fetch, shared by SYN-flood and port-scan detection.
 #[inline(always)]
-fn is_syn_packet(ctx: &XdpContext, ip_hdr_len: usize) -> Option<bool> {
+fn parse_tcp_info(ctx: &XdpContext, ip_hdr_len: usize) -> Option<TcpInfo> {
     let offset = mem::size_of::<EthHdr>() + ip_hdr_len;
     let tcp = ptr_at::<TcpHdr>(ctx, offset)?;
-    let (syn, ack) = unsafe { ((*tcp).syn(), (*tcp).ack()) };
-    Some(syn != 0 && ack == 0)
+    let (syn, ack, dest) = unsafe { ((*tcp).syn(), (*tcp).ack(), (*tcp).dest) };
+    Some(TcpInfo {
+        is_syn: syn != 0 && ack == 0,
+        dst_port: u16::from_be_bytes(dest),
+    })
 }
 
 #[inline(always)]
@@ -128,6 +151,16 @@ fn record_syn(src_addr: u32, bytes: u64) {
             // observe-only.
             let _ = (*ptr::addr_of_mut!(SYN_TRACKER)).insert(src_addr, fresh, 0);
         }
+    }
+}
+
+#[inline(always)]
+fn record_port_touch(key: PortScanKey) {
+    let touch = PortTouch {
+        last_seen_ns: unsafe { bpf_ktime_get_ns() },
+    };
+    unsafe {
+        let _ = (*ptr::addr_of_mut!(PORT_SCAN_TRACKER)).insert(key, touch, 0);
     }
 }
 
@@ -162,8 +195,13 @@ fn try_ebpf_xdp_program(ctx: XdpContext) -> Result<u32, u32> {
             }
         }
 
-        if l3.proto == IpProto::Tcp && is_syn_packet(&ctx, l3.ip_hdr_len) == Some(true) {
-            record_syn(l3.src_addr, bytes);
+        if l3.proto == IpProto::Tcp {
+            if let Some(tcp) = parse_tcp_info(&ctx, l3.ip_hdr_len) {
+                if tcp.is_syn {
+                    record_syn(l3.src_addr, bytes);
+                    record_port_touch(PortScanKey::new(l3.src_addr, tcp.dst_port));
+                }
+            }
         }
     }
 
