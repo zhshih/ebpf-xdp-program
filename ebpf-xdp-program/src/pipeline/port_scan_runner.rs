@@ -47,8 +47,10 @@ impl PortScanRunner {
             );
         }
 
-        // Metrics wiring lands with the metrics.rs changes; unused for now.
-        let _ = metrics;
+        metrics.update_port_scan(&top_n, self.alert_manager.active_count());
+        for event in &events {
+            metrics.record_port_scan_event(event.lifecycle);
+        }
 
         self.last_top_n = top_n;
     }
