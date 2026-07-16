@@ -423,7 +423,7 @@ mod tests {
         let signal = spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 1.0);
         let now = Instant::now();
 
-        mgr.evaluate(&[signal.clone()], now); // Pending, not yet Firing
+        mgr.evaluate(std::slice::from_ref(&signal), now); // Pending, not yet Firing
         let heartbeats = mgr.heartbeats(&[signal], &HashSet::new());
         assert!(heartbeats.is_empty(), "should not heartbeat while Pending");
     }
@@ -434,11 +434,11 @@ mod tests {
         let signal = spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 0.9);
         let now = Instant::now();
 
-        let fired = mgr.evaluate(&[signal.clone()], now);
+        let fired = mgr.evaluate(std::slice::from_ref(&signal), now);
         assert_eq!(fired.len(), 1);
 
         // Next tick: still firing, no new transition.
-        let events = mgr.evaluate(&[signal.clone()], now);
+        let events = mgr.evaluate(std::slice::from_ref(&signal), now);
         assert!(events.is_empty());
 
         let heartbeats = mgr.heartbeats(&[signal], &HashSet::new());
@@ -455,7 +455,7 @@ mod tests {
         let signal = spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 1.0);
         let now = Instant::now();
 
-        let fired = mgr.evaluate(&[signal.clone()], now);
+        let fired = mgr.evaluate(std::slice::from_ref(&signal), now);
         assert_eq!(fired.len(), 1);
         let just_transitioned: HashSet<_> = fired
             .iter()
