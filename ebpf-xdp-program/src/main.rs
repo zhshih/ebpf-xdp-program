@@ -1,4 +1,5 @@
 mod alert;
+mod alertmanager;
 mod anomaly;
 mod api;
 mod baseline;
