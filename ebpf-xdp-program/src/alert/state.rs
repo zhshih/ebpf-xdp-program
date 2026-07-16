@@ -164,6 +164,15 @@ impl AlertState {
         }
     }
 
+    /// Returns `true` if the alert is currently `Firing`.
+    ///
+    /// Used to source heartbeat re-sends to external alert sinks (e.g.
+    /// Alertmanager) between the `Fired` and `Resolved` transitions, since
+    /// `advance()` only emits an event on a transition, not every tick.
+    pub(crate) fn is_firing(&self) -> bool {
+        self.phase == AlertPhase::Firing
+    }
+
     /// Returns `true` if the alert is in `Pending`, `Firing`, or within cooldown of last fire.
     ///
     /// Used by the alert manager to determine which protocols should have
