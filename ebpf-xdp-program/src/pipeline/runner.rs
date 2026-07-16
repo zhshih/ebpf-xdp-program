@@ -1,13 +1,16 @@
-use std::time::Instant;
+use std::{collections::HashSet, time::Instant};
 
 use ebpf_xdp_program_common::ProtoIndex;
 
 use crate::{
-    alert::{AlertEvent, AlertManager},
+    alert::{Alert, AlertEvent, AlertManager},
     anomaly::{AnomalyDetector, EmergencyDetector, EwmaDetector, compute_anomaly_view},
     baseline::{BaselineState, EwmaEstimator},
     metrics::MetricsHandle,
-    pipeline::view::{AlertSlotSnapshot, ProtoSnapshot, RunnerSnapshot},
+    pipeline::{
+        TickAlerts,
+        view::{AlertSlotSnapshot, ProtoSnapshot, RunnerSnapshot},
+    },
     rate::{ProtoRate, TrafficCountersSnapshot, compute_rates},
 };
 
@@ -38,15 +41,27 @@ impl AnomalyRunner {
         }
     }
 
-    pub fn tick(&mut self, current: &Option<TrafficCountersSnapshot>, metrics: &MetricsHandle) {
+    pub fn tick(
+        &mut self,
+        current: &Option<TrafficCountersSnapshot>,
+        metrics: &MetricsHandle,
+    ) -> TickAlerts<AlertEvent, Alert> {
         // Advances the baseline's wall-clock gate unconditionally: this is called once
         // per real ANOMALY_EVAL_INTERVAL tick regardless of data availability, so time
         // must keep advancing even when there's nothing to process yet.
         self.baseline.advance();
 
-        let Some(curr) = current else { return };
+        let Some(curr) = current else {
+            return TickAlerts {
+                transitions: Vec::new(),
+                heartbeats: Vec::new(),
+            };
+        };
         let Some(prev) = super::prime_or_diff(&mut self.prev_counters, current) else {
-            return;
+            return TickAlerts {
+                transitions: Vec::new(),
+                heartbeats: Vec::new(),
+            };
         };
 
         let rates = compute_rates(&prev, curr);
@@ -60,7 +75,7 @@ impl AnomalyRunner {
         }
 
         let ewma_detector = EwmaDetector::new(&self.baseline);
-        let events = run_anomaly_pipeline(
+        let alerts = run_anomaly_pipeline(
             &rates,
             &ewma_detector,
             &self.emergency_detector,
@@ -78,14 +93,14 @@ impl AnomalyRunner {
             self.baseline.update(&unfrozen);
         }
 
-        if events.is_empty() {
+        if alerts.transitions.is_empty() {
             tracing::info!(
                 baseline_ready = any_ready,
                 "no alert events generated during anomaly evaluation"
             );
         }
 
-        for event in &events {
+        for event in &alerts.transitions {
             tracing::warn!(
                 proto = ?event.alert.proto,
                 level = ?event.alert.level,
@@ -100,11 +115,13 @@ impl AnomalyRunner {
         metrics.update_baseline(&self.baseline);
         metrics.update_anomaly(&rates, &self.baseline);
         metrics.update_alerts(&self.alert_manager.snapshot(), &frozen);
-        for event in &events {
+        for event in &alerts.transitions {
             metrics.record_alert_event(event.alert.proto, event.alert.kind, event.lifecycle);
         }
 
         self.last_rates = rates;
+
+        alerts
     }
 
     /// Whether the EWMA baseline has produced at least one non-warming tick.
@@ -157,7 +174,7 @@ fn run_anomaly_pipeline<E: AnomalyDetector, Em: AnomalyDetector>(
     ewma: &E,
     emergency: &Em,
     alert_manager: &mut AlertManager,
-) -> Vec<AlertEvent> {
+) -> TickAlerts<AlertEvent, Alert> {
     let mut all_signals = ewma.detect(rates);
     all_signals.extend(emergency.detect(rates));
 
@@ -165,7 +182,17 @@ fn run_anomaly_pipeline<E: AnomalyDetector, Em: AnomalyDetector>(
         tracing::info!("generated {} total signals", all_signals.len());
     }
 
-    alert_manager.evaluate(&all_signals, Instant::now())
+    let transitions = alert_manager.evaluate(&all_signals, Instant::now());
+    let just_transitioned: HashSet<_> = transitions
+        .iter()
+        .map(|e| (e.alert.proto, e.alert.kind))
+        .collect();
+    let heartbeats = alert_manager.heartbeats(&all_signals, &just_transitioned);
+
+    TickAlerts {
+        transitions,
+        heartbeats,
+    }
 }
 
 #[cfg(test)]
@@ -462,8 +489,8 @@ mod tests {
     fn pipeline_no_signals_when_ready() {
         let det = SignalDetector(vec![]);
         let mut mgr = AlertManager::new(vec![immediate_spike_rule()]);
-        let events = run_anomaly_pipeline(&make_rates(), &det, &det, &mut mgr);
-        assert!(events.is_empty());
+        let alerts = run_anomaly_pipeline(&make_rates(), &det, &det, &mut mgr);
+        assert!(alerts.transitions.is_empty());
     }
 
     #[test]
@@ -477,8 +504,8 @@ mod tests {
         let det = SignalDetector(vec![signal]);
         let empty = SignalDetector(vec![]);
         let mut mgr = AlertManager::new(vec![immediate_spike_rule()]);
-        let events = run_anomaly_pipeline(&make_rates(), &det, &empty, &mut mgr);
-        assert!(!events.is_empty());
+        let alerts = run_anomaly_pipeline(&make_rates(), &det, &empty, &mut mgr);
+        assert!(!alerts.transitions.is_empty());
     }
 
     /// End-to-end: warm up a real EWMA baseline, then inject a massive traffic spike.
@@ -531,11 +558,20 @@ mod tests {
             bps: 10_000_000.0,
         }];
 
-        let events = run_anomaly_pipeline(&spike, &ewma_detector, &emergency, &mut alert_manager);
+        let alerts = run_anomaly_pipeline(&spike, &ewma_detector, &emergency, &mut alert_manager);
 
-        assert!(!events.is_empty(), "expected at least one alert event");
-        assert!(matches!(events[0].lifecycle, AlertLifecycle::Fired));
-        assert_eq!(events[0].alert.proto, ProtoIndex::Tcp);
-        assert!(matches!(events[0].alert.level, AnomalyLevel::Severe));
+        assert!(
+            !alerts.transitions.is_empty(),
+            "expected at least one alert event"
+        );
+        assert!(matches!(
+            alerts.transitions[0].lifecycle,
+            AlertLifecycle::Fired
+        ));
+        assert_eq!(alerts.transitions[0].alert.proto, ProtoIndex::Tcp);
+        assert!(matches!(
+            alerts.transitions[0].alert.level,
+            AnomalyLevel::Severe
+        ));
     }
 }

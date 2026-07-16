@@ -1,10 +1,10 @@
-use std::time::Instant;
+use std::{collections::HashSet, time::Instant};
 
 use crate::{
-    alert::SynFloodAlertManager,
+    alert::{SynFloodAlert, SynFloodAlertEvent, SynFloodAlertManager},
     anomaly::SynFloodDetector,
     metrics::MetricsHandle,
-    pipeline::view::SynFloodSnapshot,
+    pipeline::{TickAlerts, view::SynFloodSnapshot},
     rate::{SynCountersSnapshot, SynIpRate, compute_syn_rates_top_n},
 };
 
@@ -31,17 +31,29 @@ impl SynFloodRunner {
         }
     }
 
-    pub fn tick(&mut self, current: &Option<SynCountersSnapshot>, metrics: &MetricsHandle) {
-        let Some(curr) = current else { return };
+    pub fn tick(
+        &mut self,
+        current: &Option<SynCountersSnapshot>,
+        metrics: &MetricsHandle,
+    ) -> TickAlerts<SynFloodAlertEvent, SynFloodAlert> {
+        let Some(curr) = current else {
+            return TickAlerts {
+                transitions: Vec::new(),
+                heartbeats: Vec::new(),
+            };
+        };
         let Some(prev) = super::prime_or_diff(&mut self.prev_snapshot, current) else {
-            return;
+            return TickAlerts {
+                transitions: Vec::new(),
+                heartbeats: Vec::new(),
+            };
         };
 
         let top_n = compute_syn_rates_top_n(&prev, curr, self.detector.top_n());
         let signals = self.detector.detect(&top_n);
-        let events = self.alert_manager.evaluate(&signals, Instant::now());
+        let transitions = self.alert_manager.evaluate(&signals, Instant::now());
 
-        for event in &events {
+        for event in &transitions {
             tracing::warn!(
                 src_ip = %event.alert.src_ip,
                 pps = event.alert.pps,
@@ -52,11 +64,19 @@ impl SynFloodRunner {
         }
 
         metrics.update_synflood(&top_n, self.alert_manager.active_count());
-        for event in &events {
+        for event in &transitions {
             metrics.record_synflood_event(event.lifecycle);
         }
 
+        let just_transitioned: HashSet<_> = transitions.iter().map(|e| e.alert.src_ip).collect();
+        let heartbeats = self.alert_manager.heartbeats(&signals, &just_transitioned);
+
         self.last_top_n = top_n;
+
+        TickAlerts {
+            transitions,
+            heartbeats,
+        }
     }
 
     /// Assembles a point-in-time view of SYN-flood state for the `/synflood`
@@ -157,5 +177,31 @@ mod tests {
         assert_eq!(snapshot.alerts[0].phase_label, "firing");
         assert_eq!(snapshot.alerts[0].consecutive_count, 1);
         assert_eq!(snapshot.alerts[0].src_ip, Ipv4Addr::from(1));
+    }
+
+    #[test]
+    fn synflood_runner_tick_heartbeats_still_firing_alert() {
+        let mut runner = make_runner(100.0, 10);
+        let mut t = Instant::now();
+        runner.tick(&Some(snap(t, &[(1, 0)])), &MetricsHandle); // prime
+
+        t += Duration::from_secs(1);
+        let fired = runner.tick(&Some(snap(t, &[(1, 500)])), &MetricsHandle);
+        assert_eq!(fired.transitions.len(), 1);
+        assert!(
+            fired.heartbeats.is_empty(),
+            "should not double-send an alert that just fired this tick"
+        );
+
+        t += Duration::from_secs(1);
+        // Cumulative counter delta must itself stay over threshold (500 -> 1000
+        // over 1s = 500 pps), not just be numerically larger than 500.
+        let alerts = runner.tick(&Some(snap(t, &[(1, 1000)])), &MetricsHandle);
+        assert!(
+            alerts.transitions.is_empty(),
+            "still firing, no new transition"
+        );
+        assert_eq!(alerts.heartbeats.len(), 1);
+        assert_eq!(alerts.heartbeats[0].src_ip, Ipv4Addr::from(1));
     }
 }
