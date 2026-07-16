@@ -51,5 +51,6 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed["baseline"]["alpha"], expected_alpha);
         assert!(!parsed["alert_rules"].as_array().unwrap().is_empty());
+        assert_eq!(parsed["alertmanager"]["enabled"], false);
     }
 }
