@@ -39,6 +39,8 @@ tokio = { version = "1.40.0", features = [
 which = { version = "6.0.0", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive"] }
 toml = { version = "0.8", default-features = false, features = ["parse"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+humantime = { version = "2", default-features = false }
 
 [profile.release.package.ebpf-xdp-program-ebpf]
 debug = 2
