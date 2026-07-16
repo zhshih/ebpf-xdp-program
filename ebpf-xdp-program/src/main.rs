@@ -197,6 +197,11 @@ async fn main() -> anyhow::Result<()> {
         detectors.port_scan_alert_manager,
     );
 
+    // Must read out of `resolved_config` before it's moved by value into
+    // `spawn_api_server` below.
+    let am_sink = alertmanager::maybe_spawn(&resolved_config.alertmanager);
+    let am_generator_url = resolved_config.alertmanager.generator_url.clone();
+
     let api_ctx = spawn_api_server(api_port, resolved_config);
 
     loop {
@@ -253,7 +258,17 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             _ = anomaly_eval_tick.tick() => {
-                anomaly_runner.tick(&current_counters, &metrics_handle);
+                let alerts = anomaly_runner.tick(&current_counters, &metrics_handle);
+                if let Some(sink) = &am_sink {
+                    let now = std::time::SystemTime::now();
+                    for event in &alerts.transitions {
+                        let ends_at = matches!(event.lifecycle, alert::AlertLifecycle::Resolved).then_some(now);
+                        sink.push(alertmanager::alert_to_wire(&event.alert, now, ends_at, am_generator_url.as_deref()));
+                    }
+                    for hb in &alerts.heartbeats {
+                        sink.push(alertmanager::alert_to_wire(hb, now, None, am_generator_url.as_deref()));
+                    }
+                }
                 let mut state = api_ctx.dynamic.write().await;
                 state.warmed_up = anomaly_runner.warmed_up();
                 state.runner_snapshot = Some(anomaly_runner.snapshot(std::time::Instant::now()));
@@ -262,7 +277,17 @@ async fn main() -> anyhow::Result<()> {
                 let Some(curr) = read_or_skip(read_syn_snapshot(&syn_tracker), "SYN_TRACKER snapshot") else {
                     continue;
                 };
-                synflood_runner.tick(&Some(curr), &metrics_handle);
+                let alerts = synflood_runner.tick(&Some(curr), &metrics_handle);
+                if let Some(sink) = &am_sink {
+                    let now = std::time::SystemTime::now();
+                    for event in &alerts.transitions {
+                        let ends_at = matches!(event.lifecycle, alert::AlertLifecycle::Resolved).then_some(now);
+                        sink.push(alertmanager::synflood_alert_to_wire(&event.alert, now, ends_at, am_generator_url.as_deref()));
+                    }
+                    for hb in &alerts.heartbeats {
+                        sink.push(alertmanager::synflood_alert_to_wire(hb, now, None, am_generator_url.as_deref()));
+                    }
+                }
                 let mut state = api_ctx.dynamic.write().await;
                 state.synflood_snapshot = Some(synflood_runner.snapshot());
             }
@@ -270,7 +295,17 @@ async fn main() -> anyhow::Result<()> {
                 let Some(curr) = read_or_skip(read_port_scan_snapshot(&port_scan_tracker), "PORT_SCAN_TRACKER snapshot") else {
                     continue;
                 };
-                port_scan_runner.tick(&Some(curr), &metrics_handle);
+                let alerts = port_scan_runner.tick(&Some(curr), &metrics_handle);
+                if let Some(sink) = &am_sink {
+                    let now = std::time::SystemTime::now();
+                    for event in &alerts.transitions {
+                        let ends_at = matches!(event.lifecycle, alert::AlertLifecycle::Resolved).then_some(now);
+                        sink.push(alertmanager::port_scan_alert_to_wire(&event.alert, now, ends_at, am_generator_url.as_deref()));
+                    }
+                    for hb in &alerts.heartbeats {
+                        sink.push(alertmanager::port_scan_alert_to_wire(hb, now, None, am_generator_url.as_deref()));
+                    }
+                }
                 let mut state = api_ctx.dynamic.write().await;
                 state.port_scan_snapshot = Some(port_scan_runner.snapshot());
             }
