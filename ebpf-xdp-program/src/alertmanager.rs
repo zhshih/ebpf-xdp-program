@@ -8,9 +8,30 @@
 //! `main.rs`'s `select!` loop would change its blocking characteristics), so
 //! [`AlertmanagerSink::push`] enqueues onto a bounded channel and a
 //! separately-spawned background task owns the actual async HTTP POSTs.
-use std::{collections::BTreeMap, time::SystemTime};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, SystemTime},
+};
 
-use crate::alert::{Alert, PortScanAlert, SynFloodAlert};
+use tokio::sync::mpsc::{self, error::TrySendError};
+
+use crate::{
+    alert::{Alert, PortScanAlert, SynFloodAlert},
+    config::ResolvedAlertmanagerConfig,
+    metrics::MetricsHandle,
+};
+
+/// Capacity of the channel from `tick()`'s synchronous `push()` calls to the
+/// background dispatcher task. Bounded (not unbounded): the risk isn't a
+/// dead receiver (that already fails fast via `TrySendError::Closed`) but a
+/// slow-but-alive one stuck retrying during an Alertmanager outage, which
+/// would otherwise grow memory without limit for the outage's duration.
+const DISPATCH_CHANNEL_CAPACITY: usize = 256;
+/// Caps how many queued alerts one dispatcher iteration batches into a
+/// single POST, so a large backlog doesn't produce one unbounded request.
+const MAX_BATCH: usize = 64;
+const RETRY_ATTEMPTS: u32 = 3;
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(300);
 
 fn rfc3339(t: SystemTime) -> String {
     humantime::format_rfc3339(t).to_string()
@@ -139,6 +160,130 @@ pub fn port_scan_alert_to_wire(
         ends_at: ends_at.map(rfc3339),
         generator_url: generator_url.map(str::to_string),
     }
+}
+
+/// Non-blocking handle for enqueuing alerts to the background dispatcher
+/// task. Cheap to clone (wraps a `tokio::sync::mpsc::Sender`).
+#[derive(Clone)]
+pub struct AlertmanagerSink {
+    tx: mpsc::Sender<AlertmanagerAlert>,
+}
+
+impl AlertmanagerSink {
+    /// Enqueues `alert` for delivery. Never blocks the caller — called from
+    /// `tick()`'s synchronous path — so a full queue or a dead dispatcher
+    /// task just drops the alert (counted/logged) rather than waiting.
+    pub fn push(&self, alert: AlertmanagerAlert) {
+        match self.tx.try_send(alert) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                MetricsHandle.record_alertmanager_dropped();
+                tracing::warn!("Alertmanager dispatch queue full; dropping alert");
+            }
+            Err(TrySendError::Closed(_)) => {
+                tracing::debug!("Alertmanager dispatcher task not running; dropping alert");
+            }
+        }
+    }
+}
+
+/// Builds the HTTP client and spawns the background dispatcher task if
+/// Alertmanager pushing is enabled. Returns `None` (a no-op) otherwise.
+///
+/// Relies on [`crate::config::build_alertmanager`]'s invariant that `url` is
+/// always `Some` when `cfg.enabled` — that's validated at config-load time,
+/// not here.
+pub fn maybe_spawn(cfg: &ResolvedAlertmanagerConfig) -> Option<AlertmanagerSink> {
+    if !cfg.enabled {
+        return None;
+    }
+    let url = cfg
+        .url
+        .clone()
+        .expect("ResolvedAlertmanagerConfig::enabled implies url is Some");
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(cfg.timeout_secs))
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "failed to build Alertmanager HTTP client; alerts will not be pushed"
+            );
+            return None;
+        }
+    };
+
+    let (tx, rx) = mpsc::channel(DISPATCH_CHANNEL_CAPACITY);
+    tokio::task::spawn(run_dispatcher(rx, client, url));
+    Some(AlertmanagerSink { tx })
+}
+
+/// Drains the channel, batching bursts into single POSTs, until the sink
+/// (and every clone of it) is dropped.
+async fn run_dispatcher(
+    mut rx: mpsc::Receiver<AlertmanagerAlert>,
+    client: reqwest::Client,
+    url: String,
+) {
+    while let Some(first) = rx.recv().await {
+        let mut batch = vec![first];
+        while batch.len() < MAX_BATCH {
+            match rx.try_recv() {
+                Ok(next) => batch.push(next),
+                Err(_) => break,
+            }
+        }
+
+        match post_with_retry(&client, &url, &batch).await {
+            Ok(()) => MetricsHandle.record_alertmanager_push(true),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    count = batch.len(),
+                    "failed to push alert batch to Alertmanager after retries; dropping"
+                );
+                MetricsHandle.record_alertmanager_push(false);
+            }
+        }
+    }
+    tracing::info!("Alertmanager dispatcher exiting: all senders dropped");
+}
+
+/// POSTs `batch` to Alertmanager, retrying transport errors and 5xx
+/// responses with exponential backoff. Does not retry 4xx responses — a
+/// rejected payload is a bug, not a transient failure, so retrying just
+/// wastes time and delays surfacing the error.
+async fn post_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+    batch: &[AlertmanagerAlert],
+) -> anyhow::Result<()> {
+    let mut last_err = anyhow::anyhow!("post_with_retry called with RETRY_ATTEMPTS == 0");
+
+    for attempt in 0..RETRY_ATTEMPTS {
+        match client.post(url).json(batch).send().await {
+            Ok(resp) if resp.status().is_success() => return Ok(()),
+            Ok(resp) if resp.status().is_client_error() => {
+                return Err(anyhow::anyhow!(
+                    "alertmanager rejected the payload: {}",
+                    resp.status()
+                ));
+            }
+            Ok(resp) => {
+                last_err = anyhow::anyhow!("alertmanager returned {}", resp.status());
+            }
+            Err(e) => last_err = anyhow::Error::from(e),
+        }
+
+        if attempt + 1 < RETRY_ATTEMPTS {
+            tokio::time::sleep(RETRY_BASE_DELAY * 2u32.pow(attempt)).await;
+        }
+    }
+
+    Err(last_err)
 }
 
 #[cfg(test)]
@@ -273,5 +418,146 @@ mod tests {
         );
         let json = serde_json::to_value(&wire).unwrap();
         assert_eq!(json["generatorURL"], "http://localhost:8080/anomalies");
+    }
+
+    fn sample_alert() -> AlertmanagerAlert {
+        alert_to_wire(
+            &Alert {
+                proto: ProtoIndex::Tcp,
+                kind: AlertKind::Spike,
+                level: AnomalyLevel::Severe,
+                confidence: 1.0,
+            },
+            SystemTime::now(),
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn push_drops_when_channel_full_without_blocking() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let sink = AlertmanagerSink { tx };
+
+        sink.push(sample_alert()); // fills the one slot
+        sink.push(sample_alert()); // channel full: dropped, not blocked/panicked
+
+        assert!(rx.try_recv().is_ok(), "first push should have gone through");
+        assert!(
+            rx.try_recv().is_err(),
+            "second push should have been dropped, not queued"
+        );
+    }
+
+    #[test]
+    fn push_after_receiver_dropped_does_not_panic() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let sink = AlertmanagerSink { tx };
+        sink.push(sample_alert()); // dispatcher gone: should log and return, not panic
+    }
+
+    /// Spins up a throwaway Axum server bound to an ephemeral localhost port
+    /// that records every POSTed JSON body into the returned `Arc<Mutex<_>>`,
+    /// mirroring `api::serve`'s own bind pattern. Used as a stand-in
+    /// Alertmanager for dispatcher tests, avoiding a new mock-server
+    /// dev-dependency since axum is already in the dependency tree.
+    async fn spawn_recording_server() -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let received_for_handler = received.clone();
+        let app = axum::Router::new().route(
+            "/api/v2/alerts",
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let received = received_for_handler.clone();
+                async move {
+                    received.lock().unwrap().push(body);
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}/api/v2/alerts"), received)
+    }
+
+    /// Spins up a server that always responds 500, counting requests it saw.
+    async fn spawn_always_failing_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicU32>)
+    {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let attempts_for_handler = attempts.clone();
+        let app = axum::Router::new().route(
+            "/api/v2/alerts",
+            axum::routing::post(move || {
+                let attempts = attempts_for_handler.clone();
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}/api/v2/alerts"), attempts)
+    }
+
+    #[tokio::test]
+    async fn post_with_retry_delivers_batch_on_success() {
+        let (url, received) = spawn_recording_server().await;
+        let client = reqwest::Client::new();
+        let batch = vec![sample_alert()];
+
+        post_with_retry(&client, &url, &batch)
+            .await
+            .expect("mock server returns 200");
+
+        let got = received.lock().unwrap();
+        assert_eq!(got.len(), 1, "expected exactly one POST");
+        assert_eq!(got[0][0]["labels"]["alertname"], "XdpTrafficAnomaly");
+    }
+
+    #[tokio::test]
+    async fn post_with_retry_gives_up_after_max_attempts_on_500() {
+        let (url, attempts) = spawn_always_failing_server().await;
+        let client = reqwest::Client::new();
+        let batch = vec![sample_alert()];
+
+        let result = post_with_retry(&client, &url, &batch).await;
+
+        assert!(result.is_err(), "should give up after exhausting retries");
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            RETRY_ATTEMPTS,
+            "should have attempted exactly RETRY_ATTEMPTS times, no more no less"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatcher_delivers_pushed_alerts_end_to_end() {
+        let (url, received) = spawn_recording_server().await;
+        let client = reqwest::Client::new();
+        let (tx, rx) = mpsc::channel(DISPATCH_CHANNEL_CAPACITY);
+        tokio::spawn(run_dispatcher(rx, client, url));
+        let sink = AlertmanagerSink { tx };
+
+        sink.push(sample_alert());
+
+        // The dispatcher task runs on its own schedule; poll briefly rather
+        // than assume a fixed delay is enough.
+        for _ in 0..100 {
+            if !received.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(received.lock().unwrap().len(), 1);
     }
 }
