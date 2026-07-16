@@ -142,6 +142,16 @@ fn register_descriptions() {
         Unit::Count,
         "Port-scan alert lifecycle events (fired|resolved), aggregate only"
     );
+    describe_counter!(
+        "xdp_alertmanager_push_total",
+        Unit::Count,
+        "Alertmanager POST attempts, labeled by result=success|failure"
+    );
+    describe_counter!(
+        "xdp_alertmanager_dropped_total",
+        Unit::Count,
+        "Alerts dropped because the Alertmanager dispatch queue was full"
+    );
 }
 
 impl MetricsHandle {
@@ -273,5 +283,20 @@ impl MetricsHandle {
     pub fn record_port_scan_event(&self, lifecycle: AlertLifecycle) {
         metrics::counter!("xdp_portscan_alert_events_total", "lifecycle" => lifecycle.label())
             .increment(1);
+    }
+
+    /// Called once per Alertmanager POST attempt, after retries are exhausted
+    /// (success) or finally given up on (failure).
+    pub fn record_alertmanager_push(&self, success: bool) {
+        metrics::counter!("xdp_alertmanager_push_total",
+            "result" => if success { "success" } else { "failure" })
+        .increment(1);
+    }
+
+    /// Called once per alert dropped because the dispatch queue to the
+    /// Alertmanager background task was full (sink stuck retrying, or an
+    /// outage sustained long enough to fill the bounded channel).
+    pub fn record_alertmanager_dropped(&self) {
+        metrics::counter!("xdp_alertmanager_dropped_total").increment(1);
     }
 }
