@@ -55,7 +55,10 @@ mod state;
 pub mod synflood_manager;
 pub mod view;
 
-pub use model::{AlertEvent, AlertKind, AlertSignal, PortScanSignal, SynFloodSignal};
+pub use model::{
+    Alert, AlertEvent, AlertKind, AlertSignal, PortScanAlert, PortScanAlertEvent, PortScanSignal,
+    SynFloodAlert, SynFloodAlertEvent, SynFloodSignal,
+};
 pub use port_scan_manager::PortScanAlertManager;
 pub use proto_manager::{AlertManager, AlertRule};
 pub use state::AlertLifecycle;
