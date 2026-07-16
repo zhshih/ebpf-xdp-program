@@ -86,6 +86,31 @@ impl PortScanAlertManager {
         events
     }
 
+    /// Same behavior as [`crate::alert::SynFloodAlertManager::heartbeats`].
+    pub fn heartbeats(
+        &self,
+        signals: &[PortScanSignal],
+        just_transitioned: &HashSet<Ipv4Addr>,
+    ) -> Vec<PortScanAlert> {
+        let active: HashMap<Ipv4Addr, &PortScanSignal> =
+            signals.iter().map(|s| (s.src_ip, s)).collect();
+
+        self.states
+            .iter()
+            .filter_map(|(ip, state)| {
+                if !state.is_firing() || just_transitioned.contains(ip) {
+                    return None;
+                }
+                let signal = active.get(ip)?;
+                Some(PortScanAlert {
+                    src_ip: *ip,
+                    distinct_ports: signal.distinct_ports,
+                    confidence: signal.confidence,
+                })
+            })
+            .collect()
+    }
+
     pub fn active_count(&self) -> usize {
         self.states.len()
     }
@@ -188,6 +213,65 @@ mod tests {
             mgr.active_count() <= top_n,
             "active_count should stay bounded by top_n, got {}",
             mgr.active_count()
+        );
+    }
+
+    #[test]
+    fn heartbeats_empty_before_firing() {
+        let mut mgr = PortScanAlertManager::new(NO_COOLDOWN, 3, 1);
+        let now = Instant::now();
+
+        mgr.evaluate(&[signal(1, 30)], now); // Pending, not yet Firing
+        let heartbeats = mgr.heartbeats(&[signal(1, 30)], &HashSet::new());
+        assert!(heartbeats.is_empty(), "should not heartbeat while Pending");
+    }
+
+    #[test]
+    fn heartbeats_returns_alert_on_subsequent_tick_while_firing() {
+        let mut mgr = PortScanAlertManager::new(NO_COOLDOWN, 1, 1);
+        let now = Instant::now();
+
+        let fired = mgr.evaluate(&[signal(1, 30)], now);
+        assert_eq!(fired.len(), 1);
+
+        let events = mgr.evaluate(&[signal(1, 45)], now); // still firing
+        assert!(events.is_empty());
+
+        let heartbeats = mgr.heartbeats(&[signal(1, 45)], &HashSet::new());
+        assert_eq!(heartbeats.len(), 1);
+        assert_eq!(heartbeats[0].src_ip, Ipv4Addr::from(1));
+        assert_eq!(heartbeats[0].distinct_ports, 45);
+    }
+
+    #[test]
+    fn heartbeats_excludes_ip_that_just_transitioned() {
+        let mut mgr = PortScanAlertManager::new(NO_COOLDOWN, 1, 1);
+        let now = Instant::now();
+
+        let fired = mgr.evaluate(&[signal(1, 30)], now);
+        assert_eq!(fired.len(), 1);
+        let just_transitioned: HashSet<_> = fired.iter().map(|e| e.alert.src_ip).collect();
+
+        let heartbeats = mgr.heartbeats(&[signal(1, 30)], &just_transitioned);
+        assert!(
+            heartbeats.is_empty(),
+            "should not double-send an alert that fired this same tick"
+        );
+    }
+
+    #[test]
+    fn heartbeats_empty_once_signal_drops() {
+        let mut mgr = PortScanAlertManager::new(NO_COOLDOWN, 1, 2);
+        let now = Instant::now();
+
+        mgr.evaluate(&[signal(1, 30)], now); // fires
+        let events = mgr.evaluate(&[], now); // still firing, resolve threshold not yet met
+        assert!(events.is_empty());
+
+        let heartbeats = mgr.heartbeats(&[], &HashSet::new());
+        assert!(
+            heartbeats.is_empty(),
+            "no active signal this tick means no fresh data to heartbeat with"
         );
     }
 }

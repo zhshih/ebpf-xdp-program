@@ -98,6 +98,36 @@ impl SynFloodAlertManager {
         events
     }
 
+    /// Returns a re-affirmation [`SynFloodAlert`] for every currently-`Firing`
+    /// source IP that has an active signal this tick, excluding any IP
+    /// already represented in `just_transitioned` (this tick's `evaluate()`
+    /// events). See [`crate::alert::AlertManager::heartbeats`] for the full
+    /// rationale (external sinks like Alertmanager need periodic re-sends
+    /// between `Fired`/`Resolved` transitions).
+    pub fn heartbeats(
+        &self,
+        signals: &[SynFloodSignal],
+        just_transitioned: &HashSet<Ipv4Addr>,
+    ) -> Vec<SynFloodAlert> {
+        let active: HashMap<Ipv4Addr, &SynFloodSignal> =
+            signals.iter().map(|s| (s.src_ip, s)).collect();
+
+        self.states
+            .iter()
+            .filter_map(|(ip, state)| {
+                if !state.is_firing() || just_transitioned.contains(ip) {
+                    return None;
+                }
+                let signal = active.get(ip)?;
+                Some(SynFloodAlert {
+                    src_ip: *ip,
+                    pps: signal.pps,
+                    confidence: signal.confidence,
+                })
+            })
+            .collect()
+    }
+
     pub fn active_count(&self) -> usize {
         self.states.len()
     }
@@ -205,6 +235,67 @@ mod tests {
             mgr.active_count() <= top_n,
             "active_count should stay bounded by top_n, got {}",
             mgr.active_count()
+        );
+    }
+
+    #[test]
+    fn heartbeats_empty_before_firing() {
+        let mut mgr = SynFloodAlertManager::new(NO_COOLDOWN, 3, 1);
+        let now = Instant::now();
+
+        mgr.evaluate(&[signal(1, 200.0)], now); // Pending, not yet Firing
+        let heartbeats = mgr.heartbeats(&[signal(1, 200.0)], &HashSet::new());
+        assert!(heartbeats.is_empty(), "should not heartbeat while Pending");
+    }
+
+    #[test]
+    fn heartbeats_returns_alert_on_subsequent_tick_while_firing() {
+        let mut mgr = SynFloodAlertManager::new(NO_COOLDOWN, 1, 1);
+        let now = Instant::now();
+
+        let fired = mgr.evaluate(&[signal(1, 200.0)], now);
+        assert_eq!(fired.len(), 1);
+
+        let events = mgr.evaluate(&[signal(1, 250.0)], now); // still firing
+        assert!(events.is_empty());
+
+        let heartbeats = mgr.heartbeats(&[signal(1, 250.0)], &HashSet::new());
+        assert_eq!(heartbeats.len(), 1);
+        assert_eq!(heartbeats[0].src_ip, Ipv4Addr::from(1));
+        assert_eq!(heartbeats[0].pps, 250.0);
+    }
+
+    #[test]
+    fn heartbeats_excludes_ip_that_just_transitioned() {
+        let mut mgr = SynFloodAlertManager::new(NO_COOLDOWN, 1, 1);
+        let now = Instant::now();
+
+        let fired = mgr.evaluate(&[signal(1, 200.0)], now);
+        assert_eq!(fired.len(), 1);
+        let just_transitioned: HashSet<_> = fired.iter().map(|e| e.alert.src_ip).collect();
+
+        let heartbeats = mgr.heartbeats(&[signal(1, 200.0)], &just_transitioned);
+        assert!(
+            heartbeats.is_empty(),
+            "should not double-send an alert that fired this same tick"
+        );
+    }
+
+    #[test]
+    fn heartbeats_empty_once_signal_drops() {
+        // resolve_consecutive_threshold=2, so one quiet tick keeps it Firing
+        // with no active signal to source heartbeat data from.
+        let mut mgr = SynFloodAlertManager::new(NO_COOLDOWN, 1, 2);
+        let now = Instant::now();
+
+        mgr.evaluate(&[signal(1, 200.0)], now); // fires
+        let events = mgr.evaluate(&[], now); // still firing, resolve threshold not yet met
+        assert!(events.is_empty());
+
+        let heartbeats = mgr.heartbeats(&[], &HashSet::new());
+        assert!(
+            heartbeats.is_empty(),
+            "no active signal this tick means no fresh data to heartbeat with"
         );
     }
 }
