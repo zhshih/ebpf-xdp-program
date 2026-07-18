@@ -318,7 +318,10 @@ mod tests {
     use ebpf_xdp_program_common::ProtoIndex;
 
     use super::*;
-    use crate::{alert::AlertKind, anomaly::AnomalyLevel};
+    use crate::{
+        alert::{AlertKind, AlertRule},
+        anomaly::AnomalyLevel,
+    };
 
     #[test]
     fn alert_to_wire_fired_has_no_ends_at() {
@@ -659,5 +662,136 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(received.lock().unwrap().len(), 1);
+    }
+
+    /// End-to-end: a real `AnomalyRunner` warms up its baseline and fires on
+    /// an injected spike, then `dispatch_tick_alerts` carries that transition
+    /// through a real dispatcher task to a mock Alertmanager HTTP endpoint.
+    #[tokio::test]
+    async fn pipeline_to_alertmanager_end_to_end() {
+        use std::time::Instant;
+
+        use crate::{
+            alert::AlertManager,
+            baseline::EwmaEstimator,
+            config::default_emergency_detector,
+            metrics::MetricsHandle,
+            pipeline::AnomalyRunner,
+            rate::{TrafficCountersSnapshot, model::TrafficCounters},
+        };
+
+        fn snapshot(
+            t: Instant,
+            other_pkts: u64,
+            other_bytes: u64,
+            tcp_pkts: u64,
+            tcp_bytes: u64,
+        ) -> TrafficCountersSnapshot {
+            let stats = (0..ProtoIndex::COUNT as usize)
+                .map(|i| {
+                    if ProtoIndex::from_index(i) == Some(ProtoIndex::Tcp) {
+                        TrafficCounters {
+                            packets: tcp_pkts,
+                            bytes: tcp_bytes,
+                        }
+                    } else {
+                        TrafficCounters {
+                            packets: other_pkts,
+                            bytes: other_bytes,
+                        }
+                    }
+                })
+                .collect();
+            TrafficCountersSnapshot {
+                timestamp: t,
+                stats,
+            }
+        }
+
+        let (url, received) = spawn_recording_server().await;
+        let client = reqwest::Client::new();
+        let (tx, rx) = mpsc::channel(DISPATCH_CHANNEL_CAPACITY);
+        tokio::spawn(run_dispatcher(rx, client, url));
+        let sink = AlertmanagerSink { tx };
+
+        // min_samples=10, no time gate, so a handful of ticks is enough to warm up.
+        let estimator = EwmaEstimator::new(0.4, 10, 1e-3, 0);
+        let mut runner = AnomalyRunner::new(
+            estimator,
+            default_emergency_detector(),
+            AlertManager::new(vec![AlertRule {
+                kind: AlertKind::Spike,
+                min_level: AnomalyLevel::Suspicious,
+                min_confidence: 0.0,
+                cooldown: Duration::ZERO,
+                consecutive_threshold: 1,
+                resolve_consecutive_threshold: 1,
+                freezes_baseline: false,
+            }]),
+        );
+
+        let mut t = Instant::now();
+        let mut pkts = 100u64;
+        let mut bytes = 10_000u64;
+        runner.tick(&Some(snapshot(t, pkts, bytes, pkts, bytes)), &MetricsHandle); // prime
+
+        // Alternating deltas build variance above min_stddev quickly.
+        for i in 0..20 {
+            t += Duration::from_secs(1);
+            if i % 2 == 0 {
+                pkts += 100;
+                bytes += 10_000;
+            } else {
+                pkts += 50;
+                bytes += 5_000;
+            }
+            runner.tick(&Some(snapshot(t, pkts, bytes, pkts, bytes)), &MetricsHandle);
+        }
+        assert!(runner.warmed_up(), "baseline should be ready by now");
+
+        // TCP jumps >> 6σ above baseline; other protocols keep oscillating so only TCP fires.
+        t += Duration::from_secs(1);
+        let tcp_pkts = pkts + 10_000_000;
+        let tcp_bytes = bytes + 1_000_000_000;
+        pkts += 100;
+        bytes += 10_000;
+        let alerts = runner.tick(
+            &Some(snapshot(t, pkts, bytes, tcp_pkts, tcp_bytes)),
+            &MetricsHandle,
+        );
+        assert!(
+            !alerts.transitions.is_empty(),
+            "expected the injected spike to fire an alert"
+        );
+
+        dispatch_tick_alerts(
+            Some(&sink),
+            Some("http://test-host:8080/anomalies"),
+            alerts.transitions.iter().map(|e| (&e.alert, e.lifecycle)),
+            alerts.heartbeats.iter(),
+            alert_to_wire,
+        );
+
+        for _ in 0..100 {
+            if !received.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let got = received.lock().unwrap();
+        assert_eq!(got.len(), 1, "expected exactly one batched POST");
+        let posted_alert = &got[0][0];
+        assert_eq!(posted_alert["labels"]["alertname"], "XdpTrafficAnomaly");
+        assert_eq!(posted_alert["labels"]["proto"], "TCP");
+        assert_eq!(posted_alert["labels"]["kind"], "spike");
+        assert_eq!(
+            posted_alert["generatorURL"], "http://test-host:8080/anomalies",
+            "generator_url passed to dispatch_tick_alerts should reach the wire payload"
+        );
+        assert!(
+            posted_alert.get("endsAt").is_none(),
+            "a Fired transition must not carry endsAt"
+        );
     }
 }
