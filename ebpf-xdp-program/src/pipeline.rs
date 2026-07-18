@@ -8,20 +8,25 @@
 //!
 //! File layout follows the model.rs/view.rs/logic rule documented in
 //! `crate::alert`'s module doc. `pipeline` doesn't originate its own domain
-//! vocabulary — `AnomalyRunner::tick()`/`SynFloodRunner::tick()`, the
-//! *primary* methods, return `()` and only have side effects — it only
-//! orchestrates types already defined in `alert`/`anomaly`/`rate`, so it has
-//! no `model.rs`. It does have one `view.rs`: [`AlertSlotSnapshot`]/
-//! [`ProtoSnapshot`]/[`RunnerSnapshot`]/[`SynFloodSnapshot`] — see
-//! `view.rs`'s own doc comment for why — kept out of `runner.rs`/
-//! `synflood_runner.rs`, which hold only the managers themselves.
+//! vocabulary — `AnomalyRunner::tick()`/`SynFloodRunner::tick()`/
+//! `PortScanRunner::tick()`, the *primary* methods, return `()` and only
+//! have side effects — it only orchestrates types already defined in
+//! `alert`/`anomaly`/`rate`, so it has no `model.rs`. It does have one
+//! `view.rs`: [`AlertSlotSnapshot`]/[`ProtoSnapshot`]/[`RunnerSnapshot`]/
+//! [`SynFloodSnapshot`]/[`PortScanSnapshot`] — see `view.rs`'s own doc
+//! comment for why — kept out of `runner.rs`/`synflood_runner.rs`/
+//! `port_scan_runner.rs`, which hold only the managers themselves.
+mod port_scan_runner;
 mod runner;
 mod synflood_runner;
 mod view;
 
+pub use port_scan_runner::PortScanRunner;
 pub use runner::AnomalyRunner;
 pub use synflood_runner::SynFloodRunner;
-pub use view::{AlertSlotSnapshot, ProtoSnapshot, RunnerSnapshot, SynFloodSnapshot};
+pub use view::{
+    AlertSlotSnapshot, PortScanSnapshot, ProtoSnapshot, RunnerSnapshot, SynFloodSnapshot,
+};
 
 /// Shared "prime or diff" step at the top of a runner's `tick()`.
 ///

@@ -9,7 +9,7 @@ mod rate;
 
 use anyhow::Context as _;
 use aya::{
-    maps::{PerCpuArray, PerCpuHashMap},
+    maps::{HashMap as BpfHashMap, PerCpuArray, PerCpuHashMap},
     programs::{Xdp, XdpFlags},
 };
 use clap::Parser;
@@ -17,13 +17,16 @@ use clap::Parser;
 use log::warn;
 use std::time::Duration;
 
-use ebpf_xdp_program_common::{ProtoIndex, ProtoStats, SynCounter};
+use ebpf_xdp_program_common::{PortScanKey, PortTouch, ProtoIndex, ProtoStats, SynCounter};
 use tokio::signal;
 
 use crate::{
     alert::AlertManager,
-    pipeline::{AnomalyRunner, SynFloodRunner},
-    rate::{TrafficCountersSnapshot, compute_mix, diff_stats, read_snapshot, read_syn_snapshot},
+    pipeline::{AnomalyRunner, PortScanRunner, SynFloodRunner},
+    rate::{
+        TrafficCountersSnapshot, compute_mix, diff_stats, read_port_scan_snapshot, read_snapshot,
+        read_syn_snapshot,
+    },
 };
 
 const STATS_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -35,6 +38,10 @@ const ANOMALY_EVAL_INTERVAL: Duration = Duration::from_secs(30);
 // baseline warmup, which SynFloodDetector (stateless/threshold-based) has
 // no use for.
 const SYNFLOOD_EVAL_INTERVAL: Duration = Duration::from_secs(5);
+// Same cadence reasoning as SYNFLOOD_EVAL_INTERVAL: PORT_SCAN_TRACKER's
+// full-map read is comparably costly (in fact larger — 16384 vs 8192
+// max_entries), and 30s is still tuned for EWMA warmup, irrelevant here.
+const PORTSCAN_EVAL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -44,7 +51,8 @@ struct Opt {
     #[clap(long, default_value = "9091")]
     metrics_port: u16,
 
-    /// Port for the read-only JSON API (`/health`, `/config`, `/anomalies`).
+    /// Port for the read-only JSON API (`/health`, `/config`, `/anomalies`,
+    /// `/synflood`, `/portscan`).
     #[clap(long, default_value = "8080")]
     api_port: u16,
 
@@ -157,10 +165,19 @@ async fn main() -> anyhow::Result<()> {
             .context("SYN_TRACKER map not found")?,
     )?;
 
+    // PORT_SCAN_TRACKER is a plain (non-per-CPU) map — record_port_touch
+    // only overwrites a timestamp, never increments a counter, so there's
+    // no cross-CPU race to guard against (see the kernel-side map doc).
+    let port_scan_tracker: BpfHashMap<_, PortScanKey, PortTouch> = BpfHashMap::try_from(
+        ebpf.map("PORT_SCAN_TRACKER")
+            .context("PORT_SCAN_TRACKER map not found")?,
+    )?;
+
     let mut stats_poll_tick = tokio::time::interval(STATS_POLL_INTERVAL);
     let mut mix_aggregation_tick = tokio::time::interval(MIX_AGG_INTERVAL);
     let mut anomaly_eval_tick = tokio::time::interval(ANOMALY_EVAL_INTERVAL);
     let mut synflood_eval_tick = tokio::time::interval(SYNFLOOD_EVAL_INTERVAL);
+    let mut port_scan_eval_tick = tokio::time::interval(PORTSCAN_EVAL_INTERVAL);
 
     let mut current_counters: Option<TrafficCountersSnapshot> = None;
     let mut prev_mix_counters: Option<TrafficCountersSnapshot> = None;
@@ -173,6 +190,10 @@ async fn main() -> anyhow::Result<()> {
     let mut synflood_runner = SynFloodRunner::new(
         detectors.synflood_detector,
         detectors.synflood_alert_manager,
+    );
+    let mut port_scan_runner = PortScanRunner::new(
+        detectors.port_scan_detector,
+        detectors.port_scan_alert_manager,
     );
 
     let api_ctx = spawn_api_server(api_port, resolved_config);
@@ -243,6 +264,14 @@ async fn main() -> anyhow::Result<()> {
                 synflood_runner.tick(&Some(curr), &metrics_handle);
                 let mut state = api_ctx.dynamic.write().await;
                 state.synflood_snapshot = Some(synflood_runner.snapshot());
+            }
+            _ = port_scan_eval_tick.tick() => {
+                let Some(curr) = read_or_skip(read_port_scan_snapshot(&port_scan_tracker), "PORT_SCAN_TRACKER snapshot") else {
+                    continue;
+                };
+                port_scan_runner.tick(&Some(curr), &metrics_handle);
+                let mut state = api_ctx.dynamic.write().await;
+                state.port_scan_snapshot = Some(port_scan_runner.snapshot());
             }
             _ = signal::ctrl_c() => {
                 tracing::info!("Exiting...");

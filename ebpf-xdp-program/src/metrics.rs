@@ -9,7 +9,7 @@ use crate::{
     alert::{AlertKind, AlertLifecycle, AlertMetricsSnapshot},
     anomaly::{AnomalyLevel, compute_anomaly_view},
     baseline::{BaselineState, EwmaEstimator},
-    rate::{ProtoRate, SynIpRate},
+    rate::{PortScanIpBreadth, ProtoRate, SynIpRate},
 };
 
 /// Zero-size handle. All metric state lives in the global `metrics` registry.
@@ -107,11 +107,11 @@ fn register_descriptions() {
         Unit::Count,
         "Alert lifecycle events (fired|resolved)"
     );
-    // Deliberately no per-source-IP label on any SYN-flood metric below:
-    // putting attacker-controlled IPs into a Prometheus label value is a
-    // cardinality-explosion vector (rotate source IPs -> blow up the
+    // Deliberately no per-source-IP label on any SYN-flood/port-scan metric
+    // below: putting attacker-controlled IPs into a Prometheus label value
+    // is a cardinality-explosion vector (rotate source IPs -> blow up the
     // registry). Per-IP detail is only ever exposed via the bounded
-    // `/synflood` JSON endpoint.
+    // `/synflood`/`/portscan` JSON endpoints.
     describe_gauge!(
         "xdp_synflood_top_offender_pps",
         Unit::CountPerSecond,
@@ -126,6 +126,21 @@ fn register_descriptions() {
         "xdp_synflood_alert_events_total",
         Unit::Count,
         "SYN-flood alert lifecycle events (fired|resolved), aggregate only"
+    );
+    describe_gauge!(
+        "xdp_portscan_top_breadth",
+        Unit::Count,
+        "Distinct destination ports touched by the single widest-scanning source IP this tick; see /portscan for the bounded top-N breakdown"
+    );
+    describe_gauge!(
+        "xdp_portscan_active_alerts",
+        Unit::Count,
+        "Number of source IPs currently in a Pending/Firing port-scan alert state"
+    );
+    describe_counter!(
+        "xdp_portscan_alert_events_total",
+        Unit::Count,
+        "Port-scan alert lifecycle events (fired|resolved), aggregate only"
     );
 }
 
@@ -243,6 +258,20 @@ impl MetricsHandle {
     /// Called once per SYN-flood `AlertLifecycle` event. Aggregate only.
     pub fn record_synflood_event(&self, lifecycle: AlertLifecycle) {
         metrics::counter!("xdp_synflood_alert_events_total", "lifecycle" => lifecycle.label())
+            .increment(1);
+    }
+
+    /// Called at the port-scan eval tick with the current top-N scanners
+    /// and count of active alert-manager entries. Aggregate only.
+    pub fn update_port_scan(&self, top_n: &[PortScanIpBreadth], active_alerts: usize) {
+        let top_breadth = top_n.first().map_or(0.0, |b| b.distinct_ports as f64);
+        metrics::gauge!("xdp_portscan_top_breadth").set(top_breadth);
+        metrics::gauge!("xdp_portscan_active_alerts").set(active_alerts as f64);
+    }
+
+    /// Called once per port-scan `AlertLifecycle` event. Aggregate only.
+    pub fn record_port_scan_event(&self, lifecycle: AlertLifecycle) {
+        metrics::counter!("xdp_portscan_alert_events_total", "lifecycle" => lifecycle.label())
             .increment(1);
     }
 }

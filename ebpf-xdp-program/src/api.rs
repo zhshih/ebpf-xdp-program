@@ -10,16 +10,18 @@
 //! different component consumes it as an independently meaningful value.
 //! Every response/view type here ([`health::HealthResponse`],
 //! [`anomalies::AnomaliesResponse`]/`ProtoAnomalyView`/`AlertSlotView`,
-//! [`synflood::SynFloodResponse`]/`SynFloodOffenderView`) is a JSON-shaped,
+//! [`synflood::SynFloodResponse`]/`SynFloodOffenderView`,
+//! [`port_scan::PortScanResponse`]/`PortScanOffenderView`) is a JSON-shaped,
 //! second-order rendering built and consumed by exactly one handler in its
 //! own file — none of them are read by anything else, so none of them cross
 //! a boundary. The types that *do* cross into this module
-//! ([`RunnerSnapshot`], [`SynFloodSnapshot`], [`ResolvedConfig`]) already
-//! live in their producing modules rather than being duplicated here —
-//! that's why `api` has no `model.rs` of its own.
+//! ([`RunnerSnapshot`], [`SynFloodSnapshot`], [`PortScanSnapshot`],
+//! [`ResolvedConfig`]) already live in their producing modules rather than
+//! being duplicated here — that's why `api` has no `model.rs` of its own.
 mod anomalies;
 mod config;
 mod health;
+mod port_scan;
 mod synflood;
 
 use std::{net::SocketAddr, sync::Arc, time::Instant};
@@ -30,20 +32,22 @@ use tokio::sync::RwLock;
 
 use crate::{
     config::ResolvedConfig,
-    pipeline::{RunnerSnapshot, SynFloodSnapshot},
+    pipeline::{PortScanSnapshot, RunnerSnapshot, SynFloodSnapshot},
 };
 
 /// Mutable state written by the main loop, read by API handlers.
 ///
 /// `last_stats_at` is updated once per 1s stats-poll tick; `warmed_up` and
 /// `runner_snapshot` are updated once per 30s anomaly-eval tick;
-/// `synflood_snapshot` is updated once per SYN-flood eval tick.
+/// `synflood_snapshot`/`port_scan_snapshot` are updated once per their own
+/// eval ticks.
 pub struct ApiState {
     pub started_at: Instant,
     pub last_stats_at: Option<Instant>,
     pub warmed_up: bool,
     pub runner_snapshot: Option<RunnerSnapshot>,
     pub synflood_snapshot: Option<SynFloodSnapshot>,
+    pub port_scan_snapshot: Option<PortScanSnapshot>,
 }
 
 impl ApiState {
@@ -54,6 +58,7 @@ impl ApiState {
             warmed_up: false,
             runner_snapshot: None,
             synflood_snapshot: None,
+            port_scan_snapshot: None,
         }
     }
 }
@@ -69,13 +74,14 @@ pub struct ApiContext {
 }
 
 /// Builds the full router: `GET /health`, `GET /config`, `GET /anomalies`,
-/// `GET /synflood`.
+/// `GET /synflood`, `GET /portscan`.
 pub fn router(ctx: ApiContext) -> Router {
     Router::new()
         .route("/health", axum::routing::get(health::handler))
         .route("/config", axum::routing::get(config::handler))
         .route("/anomalies", axum::routing::get(anomalies::handler))
         .route("/synflood", axum::routing::get(synflood::handler))
+        .route("/portscan", axum::routing::get(port_scan::handler))
         .with_state(ctx)
 }
 

@@ -5,11 +5,15 @@ use core::{mem, ptr};
 
 use aya_ebpf::{
     bindings::xdp_action,
+    helpers::bpf_ktime_get_ns,
     macros::{map, xdp},
-    maps::{LruPerCpuHashMap, PerCpuArray},
+    maps::{LruHashMap, LruPerCpuHashMap, PerCpuArray},
     programs::XdpContext,
 };
-use ebpf_xdp_program_common::{ProtoIndex, ProtoStats, SYN_TRACKER_MAX_ENTRIES, SynCounter};
+use ebpf_xdp_program_common::{
+    PORT_SCAN_TRACKER_MAX_ENTRIES, PortScanKey, PortTouch, ProtoIndex, ProtoStats,
+    SYN_TRACKER_MAX_ENTRIES, SynCounter,
+};
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpProto, Ipv4Hdr, Ipv6Hdr},
@@ -28,6 +32,13 @@ static mut PROTO_STATS: PerCpuArray<ProtoStats> = PerCpuArray::<ProtoStats>::wit
 #[map(name = "SYN_TRACKER")]
 static mut SYN_TRACKER: LruPerCpuHashMap<u32, SynCounter> =
     LruPerCpuHashMap::<u32, SynCounter>::with_max_entries(SYN_TRACKER_MAX_ENTRIES, 0);
+
+/// Last-touch timestamps for (source IP, destination port) pairs seen in a
+/// bare TCP SYN. Non-per-CPU, unlike `SYN_TRACKER` — see [`PortTouch`]'s doc
+/// for why.
+#[map(name = "PORT_SCAN_TRACKER")]
+static mut PORT_SCAN_TRACKER: LruHashMap<PortScanKey, PortTouch> =
+    LruHashMap::<PortScanKey, PortTouch>::with_max_entries(PORT_SCAN_TRACKER_MAX_ENTRIES, 0);
 
 #[inline(always)]
 fn packet_len(ctx: &XdpContext) -> u64 {
@@ -86,8 +97,6 @@ fn parse_ipv4hdr(ctx: &XdpContext) -> Option<L3Info> {
     let ip = ptr_at::<Ipv4Hdr>(ctx, offset)?;
 
     let proto = unsafe { (*ip).proto };
-    // Network-order octets; `from_be_bytes` keeps the numeric value
-    // consistent with how user-space reconstructs `Ipv4Addr::from(u32)`.
     let src_addr = unsafe { u32::from_be_bytes((*ip).src_addr) };
     let ip_hdr_len = unsafe { (*ip).ihl() } as usize;
     Some(L3Info {
@@ -97,20 +106,33 @@ fn parse_ipv4hdr(ctx: &XdpContext) -> Option<L3Info> {
     })
 }
 
-/// Returns `Some(true)` for a bare SYN (SYN=1, ACK=0) — the half-open-
-/// connection-exhaustion signature a SYN flood relies on — `Some(false)`
-/// for any other flag combination, `None` if the TCP header doesn't fit.
+/// Parsed fields from a `TcpHdr`, for SYN-flood and port-scan detection.
 ///
-/// SYN-ACK responses are deliberately excluded: counting them would also
-/// flag hosts that are merely the target of return traffic from a
-/// reflection/amplification attack aimed elsewhere, a different attack
-/// shape than what this detector targets.
+/// `is_syn`: true only for a bare SYN (SYN=1, ACK=0) — the half-open-
+/// connection-exhaustion signature a SYN flood relies on. SYN-ACK responses
+/// are deliberately excluded: counting them would also flag hosts that are
+/// merely the target of return traffic from a reflection/amplification
+/// attack aimed elsewhere, a different attack shape than what this detector
+/// targets.
+///
+/// `dst_port`: host-order destination port, for port-scan detection.
+/// `TcpHdr::dest` has no accessor (unlike `UdpHdr::dst_port()`), so it's
+/// converted here from raw network-order bytes.
+struct TcpInfo {
+    is_syn: bool,
+    dst_port: u16,
+}
+
+/// One `TcpHdr` fetch, shared by SYN-flood and port-scan detection.
 #[inline(always)]
-fn is_syn_packet(ctx: &XdpContext, ip_hdr_len: usize) -> Option<bool> {
+fn parse_tcp_info(ctx: &XdpContext, ip_hdr_len: usize) -> Option<TcpInfo> {
     let offset = mem::size_of::<EthHdr>() + ip_hdr_len;
     let tcp = ptr_at::<TcpHdr>(ctx, offset)?;
-    let (syn, ack) = unsafe { ((*tcp).syn(), (*tcp).ack()) };
-    Some(syn != 0 && ack == 0)
+    let (syn, ack, dest) = unsafe { ((*tcp).syn(), (*tcp).ack(), (*tcp).dest) };
+    Some(TcpInfo {
+        is_syn: syn != 0 && ack == 0,
+        dst_port: u16::from_be_bytes(dest),
+    })
 }
 
 #[inline(always)]
@@ -121,13 +143,21 @@ fn record_syn(src_addr: u32, bytes: u64) {
             (*counter).bytes += bytes;
         } else {
             let fresh = SynCounter { packets: 1, bytes };
-            // Best-effort: with an LRU map `insert` practically never fails
-            // (the kernel evicts an existing entry instead of returning
-            // ENOSPC). Even if it did, a lost counter update must never
-            // propagate into a dropped/aborted packet — this program stays
-            // observe-only.
+            // Best-effort: even if insert fails, a lost counter update must
+            // never propagate into a dropped/aborted packet — this program
+            // stays observe-only.
             let _ = (*ptr::addr_of_mut!(SYN_TRACKER)).insert(src_addr, fresh, 0);
         }
+    }
+}
+
+#[inline(always)]
+fn record_port_touch(key: PortScanKey) {
+    let touch = PortTouch {
+        last_seen_ns: unsafe { bpf_ktime_get_ns() },
+    };
+    unsafe {
+        let _ = (*ptr::addr_of_mut!(PORT_SCAN_TRACKER)).insert(key, touch, 0);
     }
 }
 
@@ -162,8 +192,12 @@ fn try_ebpf_xdp_program(ctx: XdpContext) -> Result<u32, u32> {
             }
         }
 
-        if l3.proto == IpProto::Tcp && is_syn_packet(&ctx, l3.ip_hdr_len) == Some(true) {
+        if l3.proto == IpProto::Tcp
+            && let Some(tcp) = parse_tcp_info(&ctx, l3.ip_hdr_len)
+            && tcp.is_syn
+        {
             record_syn(l3.src_addr, bytes);
+            record_port_touch(PortScanKey::new(l3.src_addr, tcp.dst_port));
         }
     }
 

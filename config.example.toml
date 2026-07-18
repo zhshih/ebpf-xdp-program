@@ -50,3 +50,40 @@ freezes_baseline              = false
 proto   = "icmp"
 max_pps = 3.0
 # max_bps = 10000.0
+
+# ─── SYN-flood detection ───────────────────────────────────────────────────────
+[syn_flood]
+# Maximum allowed SYN packets-per-second from a single source IP.
+max_syn_pps = 100.0
+
+# Number of top-offending source IPs tracked/alerted on per tick.
+top_n = 10
+
+# Re-fire suppression window in seconds.
+cooldown_secs = 60
+
+# Consecutive over-threshold ticks required to fire.
+consecutive_threshold = 3
+
+# Consecutive under-threshold ticks required to resolve.
+resolve_consecutive_threshold = 3
+
+# ─── Port-scan detection ───────────────────────────────────────────────────────
+[port_scan]
+# Maximum distinct destination ports one source IP may touch within window_secs.
+max_distinct_ports = 20
+
+# Detection window, in seconds, over which distinct ports are counted.
+window_secs = 30
+
+# Number of top-scanning source IPs tracked/alerted on per tick.
+top_n = 10
+
+# Re-fire suppression window in seconds.
+cooldown_secs = 60
+
+# Consecutive over-threshold ticks required to fire.
+consecutive_threshold = 3
+
+# Consecutive under-threshold ticks required to resolve.
+resolve_consecutive_threshold = 3

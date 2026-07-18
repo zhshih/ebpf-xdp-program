@@ -4,8 +4,10 @@ use anyhow::Context as _;
 use ebpf_xdp_program_common::ProtoIndex;
 
 use crate::{
-    alert::{AlertKind, AlertRule, SynFloodAlertManager},
-    anomaly::{AnomalyLevel, EmergencyDetector, EmergencyThreshold, SynFloodDetector},
+    alert::{AlertKind, AlertRule, PortScanAlertManager, SynFloodAlertManager},
+    anomaly::{
+        AnomalyLevel, EmergencyDetector, EmergencyThreshold, PortScanDetector, SynFloodDetector,
+    },
     baseline::EwmaEstimator,
 };
 
@@ -23,6 +25,7 @@ pub struct Config {
     #[serde(default)]
     pub emergency_thresholds: Vec<EmergencyThresholdConfig>,
     pub syn_flood: Option<SynFloodConfig>,
+    pub port_scan: Option<PortScanConfig>,
 }
 
 /// Overrides for the EWMA baseline estimator parameters.
@@ -83,6 +86,23 @@ pub struct SynFloodConfig {
     pub resolve_consecutive_threshold: Option<u32>,
 }
 
+/// Overrides for per-source-IP port-scan detection.
+#[derive(serde::Deserialize)]
+pub struct PortScanConfig {
+    /// Maximum distinct destination ports one source IP may touch within `window_secs`.
+    pub max_distinct_ports: Option<u32>,
+    /// Detection window, in seconds, over which distinct ports are counted.
+    pub window_secs: Option<u64>,
+    /// Number of top-scanning source IPs tracked/alerted on per tick.
+    pub top_n: Option<usize>,
+    /// Re-fire suppression window in seconds.
+    pub cooldown_secs: Option<u64>,
+    /// Consecutive over-threshold ticks required to fire.
+    pub consecutive_threshold: Option<u32>,
+    /// Consecutive under-threshold ticks required to resolve.
+    pub resolve_consecutive_threshold: Option<u32>,
+}
+
 // ─── Resolved config (actually-in-effect values, for the `/config` API) ──────
 
 /// Resolved EWMA baseline parameters, after defaults have been merged in.
@@ -132,6 +152,17 @@ pub struct ResolvedSynFloodConfig {
     pub resolve_consecutive_threshold: u32,
 }
 
+/// Resolved per-source-IP port-scan detection parameters.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResolvedPortScanConfig {
+    pub max_distinct_ports: u32,
+    pub window_secs: u64,
+    pub top_n: usize,
+    pub cooldown_secs: u64,
+    pub consecutive_threshold: u32,
+    pub resolve_consecutive_threshold: u32,
+}
+
 /// The actually-in-effect configuration, resolved from either a TOML file or
 /// compiled-in defaults. Serialised as-is by the `/config` API endpoint.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -140,6 +171,7 @@ pub struct ResolvedConfig {
     pub alert_rules: Vec<ResolvedAlertRuleConfig>,
     pub emergency_thresholds: Vec<ResolvedEmergencyThresholdConfig>,
     pub syn_flood: ResolvedSynFloodConfig,
+    pub port_scan: ResolvedPortScanConfig,
 }
 
 // ─── String → domain type parsers ────────────────────────────────────────────
@@ -217,7 +249,6 @@ fn build_alert_rules(rules: Vec<AlertRuleConfig>) -> anyhow::Result<Vec<AlertRul
 }
 
 /// Projects a constructed [`AlertRule`] into its resolved JSON view.
-///
 /// `AlertRule`'s fields are all public, so this can run on any `Vec<AlertRule>`
 /// (built from a TOML override or a compiled-in default) after the fact —
 /// there's exactly one place where an `AlertRule`'s values exist, and this is
@@ -273,9 +304,7 @@ fn resolve_emergency_thresholds(
 
 /// Builds the SYN-flood detector and alert manager from optional overrides,
 /// returning both domain objects and the resolved scalars used to build
-/// them — same rationale as `build_estimator`/`build_emergency_detector`:
-/// neither domain type exposes getters, so this is the only point where
-/// those scalars are observable.
+/// them — same rationale as `build_estimator` (see there).
 fn build_synflood(
     cfg: Option<SynFloodConfig>,
 ) -> (
@@ -310,6 +339,49 @@ fn build_synflood(
     (detector, alert_manager, resolved)
 }
 
+/// Builds the port-scan detector and alert manager from optional overrides,
+/// returning both domain objects and the resolved scalars used to build
+/// them — same rationale as `build_synflood` (see there).
+fn build_port_scan(
+    cfg: Option<PortScanConfig>,
+) -> (
+    PortScanDetector,
+    PortScanAlertManager,
+    ResolvedPortScanConfig,
+) {
+    let max_distinct_ports = cfg
+        .as_ref()
+        .and_then(|c| c.max_distinct_ports)
+        .unwrap_or(20);
+    let window_secs = cfg.as_ref().and_then(|c| c.window_secs).unwrap_or(30);
+    let top_n = cfg.as_ref().and_then(|c| c.top_n).unwrap_or(10);
+    let cooldown_secs = cfg.as_ref().and_then(|c| c.cooldown_secs).unwrap_or(60);
+    let consecutive_threshold = cfg
+        .as_ref()
+        .and_then(|c| c.consecutive_threshold)
+        .unwrap_or(3);
+    let resolve_consecutive_threshold = cfg
+        .and_then(|c| c.resolve_consecutive_threshold)
+        .unwrap_or(3);
+
+    let window_ns = Duration::from_secs(window_secs).as_nanos() as u64;
+    let detector = PortScanDetector::new(max_distinct_ports, top_n, window_ns);
+    let alert_manager = PortScanAlertManager::new(
+        Duration::from_secs(cooldown_secs),
+        consecutive_threshold,
+        resolve_consecutive_threshold,
+    );
+    let resolved = ResolvedPortScanConfig {
+        max_distinct_ports,
+        window_secs,
+        top_n,
+        cooldown_secs,
+        consecutive_threshold,
+        resolve_consecutive_threshold,
+    };
+    (detector, alert_manager, resolved)
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /// Bundle of all constructed detector/alerting domain objects, returned
@@ -323,6 +395,8 @@ pub struct ResolvedDetectors {
     pub alert_rules: Vec<AlertRule>,
     pub synflood_detector: SynFloodDetector,
     pub synflood_alert_manager: SynFloodAlertManager,
+    pub port_scan_detector: PortScanDetector,
+    pub port_scan_alert_manager: PortScanAlertManager,
 }
 
 /// Loads and parses a TOML configuration file, returning domain objects plus
@@ -356,12 +430,15 @@ pub fn load_config(path: &std::path::Path) -> anyhow::Result<(ResolvedDetectors,
 
     let (synflood_detector, synflood_alert_manager, resolved_synflood) =
         build_synflood(cfg.syn_flood);
+    let (port_scan_detector, port_scan_alert_manager, resolved_port_scan) =
+        build_port_scan(cfg.port_scan);
 
     let resolved = ResolvedConfig {
         baseline: resolved_baseline,
         alert_rules: resolved_alert_rules,
         emergency_thresholds: resolved_emergency_thresholds,
         syn_flood: resolved_synflood,
+        port_scan: resolved_port_scan,
     };
 
     let detectors = ResolvedDetectors {
@@ -370,15 +447,18 @@ pub fn load_config(path: &std::path::Path) -> anyhow::Result<(ResolvedDetectors,
         alert_rules: rules,
         synflood_detector,
         synflood_alert_manager,
+        port_scan_detector,
+        port_scan_alert_manager,
     };
 
     Ok((detectors, resolved))
 }
 
 /// Resolves the effective configuration from an optional TOML file path,
-/// falling back to compiled-in defaults when `config_path` is `None`. Single
-/// entry point so callers (just `main.rs`) don't need to know about the
-/// TOML-vs-defaults branching.
+/// falling back to compiled-in defaults when `config_path` is `None`.
+///
+/// Single entry point so callers (just `main.rs`) don't need to know about
+/// the TOML-vs-defaults branching.
 pub fn resolve_all(
     config_path: Option<&std::path::Path>,
 ) -> anyhow::Result<(ResolvedDetectors, ResolvedConfig)> {
@@ -391,6 +471,8 @@ pub fn resolve_all(
                 alert_rules: default_alert_rules(),
                 synflood_detector: default_synflood_detector(),
                 synflood_alert_manager: default_synflood_alert_manager(),
+                port_scan_detector: default_port_scan_detector(),
+                port_scan_alert_manager: default_port_scan_alert_manager(),
             },
             default_resolved_config(),
         )),
@@ -444,9 +526,17 @@ pub fn default_synflood_alert_manager() -> SynFloodAlertManager {
     build_synflood(None).1
 }
 
+pub fn default_port_scan_detector() -> PortScanDetector {
+    build_port_scan(None).0
+}
+
+pub fn default_port_scan_alert_manager() -> PortScanAlertManager {
+    build_port_scan(None).1
+}
+
 /// Resolved view of [`default_baseline_estimator`] + [`default_alert_rules`] +
-/// [`default_emergency_detector`] + [`default_synflood_detector`], for the
-/// no-config-file startup path.
+/// [`default_emergency_detector`] + [`default_synflood_detector`] +
+/// [`default_port_scan_detector`], for the no-config-file startup path.
 pub fn default_resolved_config() -> ResolvedConfig {
     ResolvedConfig {
         baseline: build_estimator(None).1,
@@ -456,6 +546,7 @@ pub fn default_resolved_config() -> ResolvedConfig {
             .collect(),
         emergency_thresholds: resolve_emergency_thresholds(&default_emergency_thresholds()),
         syn_flood: build_synflood(None).2,
+        port_scan: build_port_scan(None).2,
     }
 }
 
@@ -666,6 +757,37 @@ mod tests {
         assert_eq!(resolved.consecutive_threshold, 3);
     }
 
+    // ── build_port_scan ──────────────────────────────────────────────────────
+
+    #[test]
+    fn build_port_scan_none_uses_defaults() {
+        let (_, _, resolved) = build_port_scan(None);
+        assert_eq!(resolved.max_distinct_ports, 20);
+        assert_eq!(resolved.window_secs, 30);
+        assert_eq!(resolved.top_n, 10);
+        assert_eq!(resolved.cooldown_secs, 60);
+        assert_eq!(resolved.consecutive_threshold, 3);
+        assert_eq!(resolved.resolve_consecutive_threshold, 3);
+    }
+
+    #[test]
+    fn build_port_scan_applies_overrides() {
+        let (_, _, resolved) = build_port_scan(Some(PortScanConfig {
+            max_distinct_ports: Some(50),
+            window_secs: Some(10),
+            top_n: Some(5),
+            cooldown_secs: None,
+            consecutive_threshold: None,
+            resolve_consecutive_threshold: None,
+        }));
+        assert_eq!(resolved.max_distinct_ports, 50);
+        assert_eq!(resolved.window_secs, 10);
+        assert_eq!(resolved.top_n, 5);
+        // Omitted fields still fall back to defaults.
+        assert_eq!(resolved.cooldown_secs, 60);
+        assert_eq!(resolved.consecutive_threshold, 3);
+    }
+
     // ── load_config ──────────────────────────────────────────────────────────
 
     #[test]
@@ -731,6 +853,25 @@ top_n = 3
         assert_eq!(resolved.syn_flood.cooldown_secs, 60);
     }
 
+    #[test]
+    fn load_config_with_port_scan_overrides() {
+        let path = std::env::temp_dir().join("test_config_port_scan_overrides.toml");
+        std::fs::write(
+            &path,
+            r#"
+[port_scan]
+max_distinct_ports = 40
+window_secs = 15
+"#,
+        )
+        .unwrap();
+        let (_, resolved) = load_config(&path).expect("should parse");
+        assert_eq!(resolved.port_scan.max_distinct_ports, 40);
+        assert_eq!(resolved.port_scan.window_secs, 15);
+        // Omitted fields still fall back to defaults.
+        assert_eq!(resolved.port_scan.top_n, 10);
+    }
+
     // ── resolved config ──────────────────────────────────────────────────────
 
     #[test]
@@ -751,6 +892,13 @@ top_n = 3
         let resolved = default_resolved_config();
         assert_eq!(resolved.syn_flood.max_syn_pps, 100.0);
         assert_eq!(resolved.syn_flood.top_n, 10);
+    }
+
+    #[test]
+    fn default_resolved_config_includes_port_scan_defaults() {
+        let resolved = default_resolved_config();
+        assert_eq!(resolved.port_scan.max_distinct_ports, 20);
+        assert_eq!(resolved.port_scan.window_secs, 30);
     }
 
     #[test]

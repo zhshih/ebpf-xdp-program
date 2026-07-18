@@ -1,8 +1,9 @@
-//! Read-only renderings of runner state for the `/anomalies`/`/synflood` API
-//! endpoints, decoupled from the runners that produce them. See
-//! `crate::alert`'s module doc for the full model.rs/view.rs/logic rule.
+//! Read-only renderings of runner state for the
+//! `/anomalies`/`/synflood`/`/portscan` API endpoints, decoupled from the
+//! runners that produce them. See `crate::alert`'s module doc for the full
+//! model.rs/view.rs/logic rule.
 //!
-//! All four types here are `snapshot()`'s output — each runner's *secondary*
+//! All five types here are `snapshot()`'s output — each runner's *secondary*
 //! method, explicitly documented as safe to call from a different task than
 //! `tick()` (the primary method, which returns `()`) — assembled once per
 //! call, stored in `ApiState`, and read later by an independent
@@ -11,10 +12,10 @@
 use ebpf_xdp_program_common::ProtoIndex;
 
 use crate::{
-    alert::{AlertKind, SynFloodAlertSlotSnapshot},
+    alert::{AlertKind, PortScanAlertSlotSnapshot, SynFloodAlertSlotSnapshot},
     anomaly::AnomalyView,
     baseline::BaselineState,
-    rate::{ProtoRate, SynIpRate},
+    rate::{PortScanIpBreadth, ProtoRate, SynIpRate},
 };
 
 /// Point-in-time view of one protocol's alert FSM slot, for the `/anomalies` API.
@@ -50,4 +51,10 @@ pub struct RunnerSnapshot {
 pub struct SynFloodSnapshot {
     pub top_offenders: Vec<SynIpRate>,
     pub alerts: Vec<SynFloodAlertSlotSnapshot>,
+}
+
+/// Point-in-time view of port-scan state, for the `/portscan` API endpoint.
+pub struct PortScanSnapshot {
+    pub top_scanners: Vec<PortScanIpBreadth>,
+    pub alerts: Vec<PortScanAlertSlotSnapshot>,
 }

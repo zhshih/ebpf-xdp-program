@@ -16,16 +16,23 @@
 //! [`SynCountersSnapshot`]/[`SynIpRate`] — every one of them is produced
 //! here and consumed by a genuinely different component (`pipeline`,
 //! `anomaly`, `metrics`, `api`; `ProtoRate` even crosses into the sibling
-//! `ewma-detector` crate). `compute.rs`/`synflood_compute.rs` hold only the
-//! logic that produces them, split by which BPF map shape they read: a
-//! fixed 5-entry `ProtoIndex` array (`compute.rs`) vs. an unbounded
-//! per-source-IP map (`synflood_compute.rs`, see its own doc comment).
+//! `ewma-detector` crate). `compute.rs`/`synflood_compute.rs`/
+//! `port_scan_compute.rs` hold only the logic that produces them, split by
+//! which BPF map shape they read: a fixed 5-entry `ProtoIndex` array
+//! (`compute.rs`), an unbounded per-source-IP map (`synflood_compute.rs`),
+//! or an unbounded per-(IP, port) map (`port_scan_compute.rs`) — see each
+//! file's own doc comment for details.
 pub mod compute;
 pub mod model;
+pub mod port_scan_compute;
 pub mod synflood_compute;
 
 pub use compute::{compute_mix, compute_rates, diff_stats, read_snapshot};
-pub use model::{ProtoRate, SynCountersSnapshot, SynIpRate, TrafficCountersSnapshot};
+pub use model::{
+    PortScanCountersSnapshot, PortScanIpBreadth, ProtoRate, SynCountersSnapshot, SynIpRate,
+    TrafficCountersSnapshot,
+};
+pub use port_scan_compute::{compute_port_scan_breadth, read_port_scan_snapshot};
 pub use synflood_compute::{compute_syn_rates_top_n, read_syn_snapshot};
 
 /// Elapsed time between two snapshot timestamps, in seconds. `None` for a

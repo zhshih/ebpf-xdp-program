@@ -52,12 +52,13 @@ impl Ewma {
         self.mad = (1.0 - self.alpha) * self.mad + self.alpha * abs_dev;
     }
 
-    /// Current EWMA mean estimate.
     pub fn mean(&self) -> f64 {
         self.mean
     }
 
-    /// Standard deviation derived from EWMA variance. Floor is `EPSILON` to avoid division by zero.
+    /// Standard deviation derived from EWMA variance.
+    ///
+    /// Floor is `EPSILON` to avoid division by zero.
     pub fn stddev(&self) -> f64 {
         libm::sqrt(self.variance).max(Self::EPSILON)
     }
