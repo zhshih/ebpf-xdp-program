@@ -16,7 +16,7 @@ use std::{
 use tokio::sync::mpsc::{self, error::TrySendError};
 
 use crate::{
-    alert::{Alert, PortScanAlert, SynFloodAlert},
+    alert::{Alert, AlertLifecycle, PortScanAlert, SynFloodAlert},
     config::ResolvedAlertmanagerConfig,
     metrics::MetricsHandle,
 };
@@ -159,6 +159,31 @@ pub fn port_scan_alert_to_wire(
         starts_at: rfc3339(now),
         ends_at: ends_at.map(rfc3339),
         generator_url: generator_url.map(str::to_string),
+    }
+}
+
+/// Converts and pushes one tick's alert transitions and heartbeats onto
+/// `sink` via `to_wire`; a no-op if `sink` is `None`.
+///
+/// `to_wire` is a plain fn pointer generic over `T`, not a trait bound:
+/// `alert_to_wire`/`synflood_alert_to_wire`/`port_scan_alert_to_wire`
+/// already share this exact signature, so no new trait is needed to make
+/// them pluggable here.
+pub fn dispatch_tick_alerts<'a, T: 'a>(
+    sink: Option<&AlertmanagerSink>,
+    generator_url: Option<&str>,
+    transitions: impl IntoIterator<Item = (&'a T, AlertLifecycle)>,
+    heartbeats: impl IntoIterator<Item = &'a T>,
+    to_wire: fn(&T, SystemTime, Option<SystemTime>, Option<&str>) -> AlertmanagerAlert,
+) {
+    let Some(sink) = sink else { return };
+    let now = SystemTime::now();
+    for (alert, lifecycle) in transitions {
+        let ends_at = matches!(lifecycle, AlertLifecycle::Resolved).then_some(now);
+        sink.push(to_wire(alert, now, ends_at, generator_url));
+    }
+    for hb in heartbeats {
+        sink.push(to_wire(hb, now, None, generator_url));
     }
 }
 

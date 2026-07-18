@@ -259,16 +259,13 @@ async fn main() -> anyhow::Result<()> {
             }
             _ = anomaly_eval_tick.tick() => {
                 let alerts = anomaly_runner.tick(&current_counters, &metrics_handle);
-                if let Some(sink) = &am_sink {
-                    let now = std::time::SystemTime::now();
-                    for event in &alerts.transitions {
-                        let ends_at = matches!(event.lifecycle, alert::AlertLifecycle::Resolved).then_some(now);
-                        sink.push(alertmanager::alert_to_wire(&event.alert, now, ends_at, am_generator_url.as_deref()));
-                    }
-                    for hb in &alerts.heartbeats {
-                        sink.push(alertmanager::alert_to_wire(hb, now, None, am_generator_url.as_deref()));
-                    }
-                }
+                alertmanager::dispatch_tick_alerts(
+                    am_sink.as_ref(),
+                    am_generator_url.as_deref(),
+                    alerts.transitions.iter().map(|e| (&e.alert, e.lifecycle)),
+                    alerts.heartbeats.iter(),
+                    alertmanager::alert_to_wire,
+                );
                 let mut state = api_ctx.dynamic.write().await;
                 state.warmed_up = anomaly_runner.warmed_up();
                 state.runner_snapshot = Some(anomaly_runner.snapshot(std::time::Instant::now()));
@@ -278,16 +275,13 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 };
                 let alerts = synflood_runner.tick(&Some(curr), &metrics_handle);
-                if let Some(sink) = &am_sink {
-                    let now = std::time::SystemTime::now();
-                    for event in &alerts.transitions {
-                        let ends_at = matches!(event.lifecycle, alert::AlertLifecycle::Resolved).then_some(now);
-                        sink.push(alertmanager::synflood_alert_to_wire(&event.alert, now, ends_at, am_generator_url.as_deref()));
-                    }
-                    for hb in &alerts.heartbeats {
-                        sink.push(alertmanager::synflood_alert_to_wire(hb, now, None, am_generator_url.as_deref()));
-                    }
-                }
+                alertmanager::dispatch_tick_alerts(
+                    am_sink.as_ref(),
+                    am_generator_url.as_deref(),
+                    alerts.transitions.iter().map(|e| (&e.alert, e.lifecycle)),
+                    alerts.heartbeats.iter(),
+                    alertmanager::synflood_alert_to_wire,
+                );
                 let mut state = api_ctx.dynamic.write().await;
                 state.synflood_snapshot = Some(synflood_runner.snapshot());
             }
@@ -296,16 +290,13 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 };
                 let alerts = port_scan_runner.tick(&Some(curr), &metrics_handle);
-                if let Some(sink) = &am_sink {
-                    let now = std::time::SystemTime::now();
-                    for event in &alerts.transitions {
-                        let ends_at = matches!(event.lifecycle, alert::AlertLifecycle::Resolved).then_some(now);
-                        sink.push(alertmanager::port_scan_alert_to_wire(&event.alert, now, ends_at, am_generator_url.as_deref()));
-                    }
-                    for hb in &alerts.heartbeats {
-                        sink.push(alertmanager::port_scan_alert_to_wire(hb, now, None, am_generator_url.as_deref()));
-                    }
-                }
+                alertmanager::dispatch_tick_alerts(
+                    am_sink.as_ref(),
+                    am_generator_url.as_deref(),
+                    alerts.transitions.iter().map(|e| (&e.alert, e.lifecycle)),
+                    alerts.heartbeats.iter(),
+                    alertmanager::port_scan_alert_to_wire,
+                );
                 let mut state = api_ctx.dynamic.write().await;
                 state.port_scan_snapshot = Some(port_scan_runner.snapshot());
             }
