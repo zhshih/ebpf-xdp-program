@@ -64,7 +64,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        alert::SynFloodAlertSlotSnapshot,
+        alert::IpAlertSlotSnapshot,
         api::{self, make_ctx},
         rate::SynIpRate,
     };
@@ -103,7 +103,7 @@ mod tests {
                     src_ip: Ipv4Addr::from(1),
                     pps: 250.0,
                 }],
-                alerts: vec![SynFloodAlertSlotSnapshot {
+                alerts: vec![IpAlertSlotSnapshot {
                     src_ip: Ipv4Addr::from(1),
                     phase_label: "firing",
                     consecutive_count: 3,
@@ -148,7 +148,7 @@ mod tests {
                     pps: 300.0,
                 },
             ],
-            alerts: vec![SynFloodAlertSlotSnapshot {
+            alerts: vec![IpAlertSlotSnapshot {
                 src_ip: Ipv4Addr::from(2),
                 phase_label: "pending",
                 consecutive_count: 1,

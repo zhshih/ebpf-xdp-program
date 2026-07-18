@@ -460,6 +460,81 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_tick_alerts_is_noop_when_sink_none() {
+        let alert = Alert {
+            proto: ProtoIndex::Tcp,
+            kind: AlertKind::Spike,
+            level: AnomalyLevel::Severe,
+            confidence: 1.0,
+        };
+        // Non-empty transitions/heartbeats: would panic if the `sink.is_none()`
+        // short-circuit were ever replaced with a force-unwrap.
+        dispatch_tick_alerts(
+            None,
+            None,
+            [(&alert, AlertLifecycle::Fired)],
+            [&alert],
+            alert_to_wire,
+        );
+    }
+
+    #[test]
+    fn dispatch_tick_alerts_marks_only_resolved_transitions_with_ends_at() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let sink = AlertmanagerSink { tx };
+        let fired = Alert {
+            proto: ProtoIndex::Tcp,
+            kind: AlertKind::Spike,
+            level: AnomalyLevel::Severe,
+            confidence: 1.0,
+        };
+        let resolved = Alert {
+            proto: ProtoIndex::Udp,
+            kind: AlertKind::Drop,
+            level: AnomalyLevel::Suspicious,
+            confidence: 0.0,
+        };
+
+        dispatch_tick_alerts(
+            Some(&sink),
+            None,
+            [
+                (&fired, AlertLifecycle::Fired),
+                (&resolved, AlertLifecycle::Resolved),
+            ],
+            std::iter::empty(),
+            alert_to_wire,
+        );
+
+        assert_eq!(rx.try_recv().unwrap().ends_at, None);
+        assert!(rx.try_recv().unwrap().ends_at.is_some());
+        assert!(rx.try_recv().is_err(), "no further alerts expected");
+    }
+
+    #[test]
+    fn dispatch_tick_alerts_heartbeats_never_have_ends_at() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let sink = AlertmanagerSink { tx };
+        let alert = Alert {
+            proto: ProtoIndex::Tcp,
+            kind: AlertKind::Spike,
+            level: AnomalyLevel::Severe,
+            confidence: 1.0,
+        };
+
+        dispatch_tick_alerts(
+            Some(&sink),
+            None,
+            std::iter::empty(),
+            [&alert],
+            alert_to_wire,
+        );
+
+        assert_eq!(rx.try_recv().unwrap().ends_at, None);
+        assert!(rx.try_recv().is_err(), "no further alerts expected");
+    }
+
+    #[test]
     fn push_drops_when_channel_full_without_blocking() {
         let (tx, mut rx) = mpsc::channel(1);
         let sink = AlertmanagerSink { tx };

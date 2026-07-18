@@ -1,151 +1,22 @@
-//! Per-source-IP SYN-flood alerting.
-//!
-//! Deliberately parallel to, not folded into, [`crate::alert::AlertManager`]:
-//! `AlertManager`'s `AlertKey { proto: ProtoIndex, kind: AlertKind }` has
-//! nowhere to put an `Ipv4Addr` without either widening `AlertKey` (which
-//! ripples into `frozen_protos()`, `AlertMetricsSnapshot`, and every
-//! existing Spike/Drop/Emergency test) or collapsing all attacker IPs into
-//! one bucket (destroying the "which IP" information this exists to
-//! surface). [`SynFloodAlertManager`] reuses [`AlertState`] — the FSM
-//! primitive itself — but keeps its own small, separately-bounded map.
-//!
-//! `SynFloodSignal`/`SynFloodAlert`/`SynFloodAlertEvent` live in
-//! `crate::alert::model`; [`SynFloodAlertSlotSnapshot`] lives in
-//! `crate::alert::view` (see `crate::alert`'s module doc for why). This file
-//! keeps only what's private to `SynFloodAlertManager` itself: its FSM/GC
-//! logic.
-use std::{
-    collections::{HashMap, HashSet},
-    net::Ipv4Addr,
-    time::{Duration, Instant},
-};
-
+//! Type alias instantiating the generic FSM manager for SYN-flood alerting.
+//! See `crate::alert::ip_manager` for the shared FSM/GC logic and
+//! `crate::alert`'s module doc for why this file still exists separately
+//! from `port_scan_manager.rs`.
 use crate::alert::{
-    model::{SynFloodAlert, SynFloodAlertEvent, SynFloodSignal},
-    state::AlertState,
-    view::SynFloodAlertSlotSnapshot,
+    ip_manager::IpAlertManager,
+    model::{SynFloodAlert, SynFloodSignal},
 };
 
-/// Drives per-source-IP SYN-flood alert FSMs.
-///
-/// Bounded memory: an entry is only ever created for an IP present in the
-/// current tick's (already-bounded, top-N) signal list, and `evaluate()`
-/// garbage-collects any entry that is neither in this tick's signals nor
-/// still "hot" (Pending/Firing/within cooldown) — so live state is bounded
-/// by roughly `top_n + (IPs still cooling down)`, both attacker-independent
-/// config knobs, independent of how many distinct source IPs an attacker
-/// rotates through over time.
-pub struct SynFloodAlertManager {
-    cooldown: Duration,
-    consecutive_threshold: u32,
-    resolve_consecutive_threshold: u32,
-    states: HashMap<Ipv4Addr, AlertState>,
-}
-
-impl SynFloodAlertManager {
-    pub fn new(
-        cooldown: Duration,
-        consecutive_threshold: u32,
-        resolve_consecutive_threshold: u32,
-    ) -> Self {
-        Self {
-            cooldown,
-            consecutive_threshold,
-            resolve_consecutive_threshold,
-            states: HashMap::new(),
-        }
-    }
-
-    /// Filters/advances FSMs against `signals`, then garbage-collects any
-    /// entry that's neither in `signals` nor still hot.
-    pub fn evaluate(
-        &mut self,
-        signals: &[SynFloodSignal],
-        now: Instant,
-    ) -> Vec<SynFloodAlertEvent> {
-        let active: HashMap<Ipv4Addr, &SynFloodSignal> =
-            signals.iter().map(|s| (s.src_ip, s)).collect();
-
-        let mut keys: HashSet<Ipv4Addr> = self.states.keys().copied().collect();
-        keys.extend(active.keys().copied());
-
-        let mut events = Vec::new();
-        for ip in keys {
-            let state = self.states.entry(ip).or_insert_with(AlertState::new);
-            let signal = active.get(&ip);
-            if let Some(lifecycle) = state.advance(
-                signal.is_some(),
-                now,
-                self.cooldown,
-                self.consecutive_threshold,
-                self.resolve_consecutive_threshold,
-            ) {
-                events.push(SynFloodAlertEvent {
-                    alert: SynFloodAlert {
-                        src_ip: ip,
-                        pps: signal.map_or(0.0, |s| s.pps),
-                        confidence: signal.map_or(0.0, |s| s.confidence),
-                    },
-                    lifecycle,
-                });
-            }
-        }
-
-        let cooldown = self.cooldown;
-        self.states
-            .retain(|ip, state| active.contains_key(ip) || state.is_hot(now, cooldown));
-
-        events
-    }
-
-    /// Returns a re-affirmation [`SynFloodAlert`] for every currently-`Firing`
-    /// source IP that has an active signal this tick, excluding any IP
-    /// already represented in `just_transitioned` (this tick's `evaluate()`
-    /// events). See [`crate::alert::AlertManager::heartbeats`] for the full
-    /// rationale (external sinks like Alertmanager need periodic re-sends
-    /// between `Fired`/`Resolved` transitions).
-    pub fn heartbeats(
-        &self,
-        signals: &[SynFloodSignal],
-        just_transitioned: &HashSet<Ipv4Addr>,
-    ) -> Vec<SynFloodAlert> {
-        let active: HashMap<Ipv4Addr, &SynFloodSignal> =
-            signals.iter().map(|s| (s.src_ip, s)).collect();
-
-        self.states
-            .iter()
-            .filter_map(|(ip, state)| {
-                if !state.is_firing() || just_transitioned.contains(ip) {
-                    return None;
-                }
-                let signal = active.get(ip)?;
-                Some(SynFloodAlert {
-                    src_ip: *ip,
-                    pps: signal.pps,
-                    confidence: signal.confidence,
-                })
-            })
-            .collect()
-    }
-
-    pub fn active_count(&self) -> usize {
-        self.states.len()
-    }
-
-    pub fn snapshot(&self) -> Vec<SynFloodAlertSlotSnapshot> {
-        self.states
-            .iter()
-            .map(|(ip, s)| SynFloodAlertSlotSnapshot {
-                src_ip: *ip,
-                phase_label: s.phase_label(),
-                consecutive_count: s.consecutive_count,
-            })
-            .collect()
-    }
-}
+pub type SynFloodAlertManager = IpAlertManager<SynFloodSignal, SynFloodAlert>;
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::HashSet,
+        net::Ipv4Addr,
+        time::{Duration, Instant},
+    };
+
     use super::*;
     use crate::alert::AlertLifecycle;
 

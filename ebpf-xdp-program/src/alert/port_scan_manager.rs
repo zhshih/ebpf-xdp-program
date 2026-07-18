@@ -1,134 +1,22 @@
-//! Per-source-IP port-scan alerting.
-//!
-//! Deliberately parallel to, not folded into, [`crate::alert::AlertManager`]
-//! — same rationale as [`crate::alert::SynFloodAlertManager`].
-//! [`PortScanAlertManager`] reuses [`AlertState`] but keeps its own small,
-//! separately-bounded map (see its own doc comment for why that's bounded).
-//!
-//! `PortScanSignal`/`PortScanAlert`/`PortScanAlertEvent` live in
-//! `crate::alert::model`; [`PortScanAlertSlotSnapshot`] lives in
-//! `crate::alert::view` (see `crate::alert`'s module doc for why). This file
-//! keeps only what's private to `PortScanAlertManager` itself: its FSM/GC
-//! logic.
-use std::{
-    collections::{HashMap, HashSet},
-    net::Ipv4Addr,
-    time::{Duration, Instant},
-};
-
+//! Type alias instantiating the generic FSM manager for port-scan alerting.
+//! See `crate::alert::ip_manager` for the shared FSM/GC logic and
+//! `crate::alert`'s module doc for why this file still exists separately
+//! from `synflood_manager.rs`.
 use crate::alert::{
-    model::{PortScanAlert, PortScanAlertEvent, PortScanSignal},
-    state::AlertState,
-    view::PortScanAlertSlotSnapshot,
+    ip_manager::IpAlertManager,
+    model::{PortScanAlert, PortScanSignal},
 };
 
-/// Drives per-source-IP port-scan alert FSMs. Same bounded-memory rationale
-/// as [`crate::alert::SynFloodAlertManager`] (see its own doc comment).
-pub struct PortScanAlertManager {
-    cooldown: Duration,
-    consecutive_threshold: u32,
-    resolve_consecutive_threshold: u32,
-    states: HashMap<Ipv4Addr, AlertState>,
-}
-
-impl PortScanAlertManager {
-    pub fn new(
-        cooldown: Duration,
-        consecutive_threshold: u32,
-        resolve_consecutive_threshold: u32,
-    ) -> Self {
-        Self {
-            cooldown,
-            consecutive_threshold,
-            resolve_consecutive_threshold,
-            states: HashMap::new(),
-        }
-    }
-
-    /// Same behavior as [`crate::alert::SynFloodAlertManager::evaluate`].
-    pub fn evaluate(
-        &mut self,
-        signals: &[PortScanSignal],
-        now: Instant,
-    ) -> Vec<PortScanAlertEvent> {
-        let active: HashMap<Ipv4Addr, &PortScanSignal> =
-            signals.iter().map(|s| (s.src_ip, s)).collect();
-
-        let mut keys: HashSet<Ipv4Addr> = self.states.keys().copied().collect();
-        keys.extend(active.keys().copied());
-
-        let mut events = Vec::new();
-        for ip in keys {
-            let state = self.states.entry(ip).or_insert_with(AlertState::new);
-            let signal = active.get(&ip);
-            if let Some(lifecycle) = state.advance(
-                signal.is_some(),
-                now,
-                self.cooldown,
-                self.consecutive_threshold,
-                self.resolve_consecutive_threshold,
-            ) {
-                events.push(PortScanAlertEvent {
-                    alert: PortScanAlert {
-                        src_ip: ip,
-                        distinct_ports: signal.map_or(0, |s| s.distinct_ports),
-                        confidence: signal.map_or(0.0, |s| s.confidence),
-                    },
-                    lifecycle,
-                });
-            }
-        }
-
-        let cooldown = self.cooldown;
-        self.states
-            .retain(|ip, state| active.contains_key(ip) || state.is_hot(now, cooldown));
-
-        events
-    }
-
-    /// Same behavior as [`crate::alert::SynFloodAlertManager::heartbeats`].
-    pub fn heartbeats(
-        &self,
-        signals: &[PortScanSignal],
-        just_transitioned: &HashSet<Ipv4Addr>,
-    ) -> Vec<PortScanAlert> {
-        let active: HashMap<Ipv4Addr, &PortScanSignal> =
-            signals.iter().map(|s| (s.src_ip, s)).collect();
-
-        self.states
-            .iter()
-            .filter_map(|(ip, state)| {
-                if !state.is_firing() || just_transitioned.contains(ip) {
-                    return None;
-                }
-                let signal = active.get(ip)?;
-                Some(PortScanAlert {
-                    src_ip: *ip,
-                    distinct_ports: signal.distinct_ports,
-                    confidence: signal.confidence,
-                })
-            })
-            .collect()
-    }
-
-    pub fn active_count(&self) -> usize {
-        self.states.len()
-    }
-
-    pub fn snapshot(&self) -> Vec<PortScanAlertSlotSnapshot> {
-        self.states
-            .iter()
-            .map(|(ip, s)| PortScanAlertSlotSnapshot {
-                src_ip: *ip,
-                phase_label: s.phase_label(),
-                consecutive_count: s.consecutive_count,
-            })
-            .collect()
-    }
-}
+pub type PortScanAlertManager = IpAlertManager<PortScanSignal, PortScanAlert>;
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::HashSet,
+        net::Ipv4Addr,
+        time::{Duration, Instant},
+    };
+
     use super::*;
     use crate::alert::AlertLifecycle;
 

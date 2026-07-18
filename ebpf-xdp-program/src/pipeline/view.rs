@@ -12,7 +12,7 @@
 use ebpf_xdp_program_common::ProtoIndex;
 
 use crate::{
-    alert::{AlertKind, PortScanAlertSlotSnapshot, SynFloodAlertSlotSnapshot},
+    alert::{AlertKind, IpAlertSlotSnapshot},
     anomaly::AnomalyView,
     baseline::BaselineState,
     rate::{PortScanIpBreadth, ProtoRate, SynIpRate},
@@ -50,11 +50,11 @@ pub struct RunnerSnapshot {
 /// Point-in-time view of SYN-flood state, for the `/synflood` API endpoint.
 pub struct SynFloodSnapshot {
     pub top_offenders: Vec<SynIpRate>,
-    pub alerts: Vec<SynFloodAlertSlotSnapshot>,
+    pub alerts: Vec<IpAlertSlotSnapshot>,
 }
 
 /// Point-in-time view of port-scan state, for the `/portscan` API endpoint.
 pub struct PortScanSnapshot {
     pub top_scanners: Vec<PortScanIpBreadth>,
-    pub alerts: Vec<PortScanAlertSlotSnapshot>,
+    pub alerts: Vec<IpAlertSlotSnapshot>,
 }

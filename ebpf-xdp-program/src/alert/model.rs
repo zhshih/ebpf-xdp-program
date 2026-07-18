@@ -2,7 +2,13 @@ use std::net::Ipv4Addr;
 
 use ebpf_xdp_program_common::ProtoIndex;
 
-use crate::{alert::state::AlertLifecycle, anomaly::AnomalyLevel};
+use crate::{
+    alert::{
+        ip_manager::{FromIpSignal, IpKeyed},
+        state::AlertLifecycle,
+    },
+    anomaly::AnomalyLevel,
+};
 
 /// Classification of what kind of anomaly was detected.
 ///
@@ -55,6 +61,14 @@ pub struct AlertEvent {
     pub lifecycle: AlertLifecycle,
 }
 
+/// An alert lifecycle transition for one source IP, generic over the
+/// finalized alert payload `A`. `SynFloodAlertEvent`/`PortScanAlertEvent`
+/// below are its two instantiations.
+pub struct IpAlertEvent<A> {
+    pub alert: A,
+    pub lifecycle: AlertLifecycle,
+}
+
 /// A per-source-IP SYN-flood signal.
 ///
 /// Deliberately not [`AlertSignal`]: that type is keyed by `ProtoIndex`,
@@ -76,11 +90,24 @@ pub struct SynFloodAlert {
     pub confidence: f64,
 }
 
-/// A SYN-flood alert lifecycle transition for one source IP.
-pub struct SynFloodAlertEvent {
-    pub alert: SynFloodAlert,
-    pub lifecycle: AlertLifecycle,
+impl IpKeyed for SynFloodSignal {
+    fn src_ip(&self) -> Ipv4Addr {
+        self.src_ip
+    }
 }
+
+impl FromIpSignal<SynFloodSignal> for SynFloodAlert {
+    fn from_signal(src_ip: Ipv4Addr, signal: Option<&SynFloodSignal>) -> Self {
+        SynFloodAlert {
+            src_ip,
+            pps: signal.map_or(0.0, |s| s.pps),
+            confidence: signal.map_or(0.0, |s| s.confidence),
+        }
+    }
+}
+
+/// A SYN-flood alert lifecycle transition for one source IP.
+pub type SynFloodAlertEvent = IpAlertEvent<SynFloodAlert>;
 
 /// A per-source-IP port-scan signal.
 ///
@@ -100,11 +127,24 @@ pub struct PortScanAlert {
     pub confidence: f64,
 }
 
-/// A port-scan alert lifecycle transition for one source IP.
-pub struct PortScanAlertEvent {
-    pub alert: PortScanAlert,
-    pub lifecycle: AlertLifecycle,
+impl IpKeyed for PortScanSignal {
+    fn src_ip(&self) -> Ipv4Addr {
+        self.src_ip
+    }
 }
+
+impl FromIpSignal<PortScanSignal> for PortScanAlert {
+    fn from_signal(src_ip: Ipv4Addr, signal: Option<&PortScanSignal>) -> Self {
+        PortScanAlert {
+            src_ip,
+            distinct_ports: signal.map_or(0, |s| s.distinct_ports),
+            confidence: signal.map_or(0.0, |s| s.confidence),
+        }
+    }
+}
+
+/// A port-scan alert lifecycle transition for one source IP.
+pub type PortScanAlertEvent = IpAlertEvent<PortScanAlert>;
 
 #[cfg(test)]
 mod tests {

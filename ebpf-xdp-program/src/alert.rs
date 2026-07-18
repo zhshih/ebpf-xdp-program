@@ -29,25 +29,42 @@
 //!   consumed by `pipeline`/`metrics` outside this module), and the
 //!   SynFlood/PortScan equivalents `SynFloodSignal`/`SynFloodAlert`/
 //!   `SynFloodAlertEvent` and `PortScanSignal`/`PortScanAlert`/
-//!   `PortScanAlertEvent`, which cross the analogous detector→manager
-//!   boundaries.
-//! - `view.rs` holds [`AlertMetricsSnapshot`], [`SynFloodAlertSlotSnapshot`],
-//!   and [`PortScanAlertSlotSnapshot`] — see `view.rs`'s own doc comment for
-//!   which method produces each and why.
+//!   `PortScanAlertEvent` (the latter two are type aliases of
+//!   [`model::IpAlertEvent`]), which cross the analogous detector→manager
+//!   boundaries. It also holds the
+//!   [`ip_manager::IpKeyed`]/[`ip_manager::FromIpSignal`] impls tying those
+//!   SynFlood/PortScan types to the generic manager below, co-located with
+//!   the concrete types rather than in `ip_manager.rs` so that file stays
+//!   decoupled from any specific detector's vocabulary.
+//! - `view.rs` holds [`AlertMetricsSnapshot`] and [`IpAlertSlotSnapshot`]
+//!   (shared by both the `/synflood` and `/portscan` APIs, since both
+//!   managers' `snapshot()` is one generic method) — see `view.rs`'s own
+//!   doc comment for which method produces each and why.
 //! - `proto_manager.rs` holds what's private to the Proto+`AlertKind`-keyed
 //!   FSM: the private `AlertKey`, [`AlertRule`] (constructor config, never
 //!   observed by anything but the manager it configures), and
 //!   [`AlertManager`] itself. Its name stays as `proto_manager.rs` rather
 //!   than folding into a `manager.rs` — it's accurately scoped to this one
 //!   generic, Proto-keyed manager, distinct from the IP-keyed SynFlood/
-//!   PortScan managers below.
-//! - `synflood_manager.rs` holds what's private to the IP-keyed FSM:
-//!   [`SynFloodAlertManager`] itself. Kept separate from `proto_manager.rs`
-//!   rather than widening `AlertKey` — see its own module doc for why.
-//! - `port_scan_manager.rs` holds [`PortScanAlertManager`], for the same
-//!   reason `synflood_manager.rs` stays separate (see above).
+//!   PortScan manager below (a real modeling difference: `AlertKey` has
+//!   nowhere to put an `Ipv4Addr`).
+//! - `ip_manager.rs` holds [`ip_manager::IpAlertManager`], the single
+//!   generic FSM/GC implementation shared by SynFlood and PortScan
+//!   alerting. Kept separate from `proto_manager.rs` for the key-type
+//!   reason above. Unlike that split, SynFlood and PortScan are both
+//!   `Ipv4Addr`-keyed — same key, same FSM logic — so there's no modeling
+//!   reason for them to have separate manager implementations;
+//!   `synflood_manager.rs`/`port_scan_manager.rs` below are just aliases
+//!   onto this one.
+//! - `synflood_manager.rs`/`port_scan_manager.rs` each hold a single
+//!   `pub type ... = IpAlertManager<...>;` alias, plus their own unit
+//!   tests, so external code keeps referring to `SynFloodAlertManager`/
+//!   `PortScanAlertManager` by their domain-meaningful names — the two
+//!   files differ only in which concrete types the alias names, not in any
+//!   logic.
 //! - `state.rs` holds `AlertLifecycle`/`AlertState`, the FSM primitive
 //!   shared by all three managers.
+pub mod ip_manager;
 pub mod model;
 pub mod port_scan_manager;
 pub mod proto_manager;
@@ -63,4 +80,4 @@ pub use port_scan_manager::PortScanAlertManager;
 pub use proto_manager::{AlertManager, AlertRule};
 pub use state::AlertLifecycle;
 pub use synflood_manager::SynFloodAlertManager;
-pub use view::{AlertMetricsSnapshot, PortScanAlertSlotSnapshot, SynFloodAlertSlotSnapshot};
+pub use view::{AlertMetricsSnapshot, IpAlertSlotSnapshot};
