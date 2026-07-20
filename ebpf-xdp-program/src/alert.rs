@@ -2,7 +2,7 @@
 //!
 //! Each `(protocol, kind)` pair is tracked by an FSM with three phases:
 //! `Inactive → Pending → Firing`. An [`AlertRule`] controls the thresholds
-//! and cooldowns that govern phase transitions. [`AlertManager`] drives all
+//! and cooldowns that govern phase transitions. [`AlertLifecycleManager`] drives all
 //! FSMs and emits [`AlertEvent`]s when alerts fire or resolve.
 //!
 //! File layout follows one rule, in three categories — canonical statement
@@ -25,7 +25,7 @@
 //!
 //! - `model.rs` holds [`AlertKind`]/[`AlertSignal`] (produced by
 //!   `EwmaDetector`/`EmergencyDetector` in `crate::anomaly`, consumed by
-//!   [`AlertManager`] here), [`AlertEvent`] (produced by [`AlertManager`],
+//!   [`AlertLifecycleManager`] here), [`AlertEvent`] (produced by [`AlertLifecycleManager`],
 //!   consumed by `pipeline`/`metrics` outside this module), and the
 //!   SynFlood/PortScan equivalents `SynFloodSignal`/`SynFloodAlert`/
 //!   `SynFloodAlertEvent` and `PortScanSignal`/`PortScanAlert`/
@@ -43,12 +43,12 @@
 //! - `proto_manager.rs` holds what's private to the Proto+`AlertKind`-keyed
 //!   FSM: the private `AlertKey`, [`AlertRule`] (constructor config, never
 //!   observed by anything but the manager it configures), and
-//!   [`AlertManager`] itself. Its name stays as `proto_manager.rs` rather
+//!   [`AlertLifecycleManager`] itself. Its name stays as `proto_manager.rs` rather
 //!   than folding into a `manager.rs` — it's accurately scoped to this one
 //!   generic, Proto-keyed manager, distinct from the IP-keyed SynFlood/
 //!   PortScan manager below (a real modeling difference: `AlertKey` has
 //!   nowhere to put an `Ipv4Addr`).
-//! - `ip_manager.rs` holds [`ip_manager::IpAlertManager`], the single
+//! - `ip_manager.rs` holds [`ip_manager::IpAlertLifecycleManager`], the single
 //!   generic FSM/GC implementation shared by SynFlood and PortScan
 //!   alerting. Kept separate from `proto_manager.rs` for the key-type
 //!   reason above. Unlike that split, SynFlood and PortScan are both
@@ -57,9 +57,9 @@
 //!   `synflood_manager.rs`/`port_scan_manager.rs` below are just aliases
 //!   onto this one.
 //! - `synflood_manager.rs`/`port_scan_manager.rs` each hold a single
-//!   `pub type ... = IpAlertManager<...>;` alias, plus their own unit
-//!   tests, so external code keeps referring to `SynFloodAlertManager`/
-//!   `PortScanAlertManager` by their domain-meaningful names — the two
+//!   `pub type ... = IpAlertLifecycleManager<...>;` alias, plus their own unit
+//!   tests, so external code keeps referring to `SynFloodAlertLifecycleManager`/
+//!   `PortScanAlertLifecycleManager` by their domain-meaningful names — the two
 //!   files differ only in which concrete types the alias names, not in any
 //!   logic.
 //! - `state.rs` holds `AlertLifecycle`/`AlertState`, the FSM primitive
@@ -76,8 +76,8 @@ pub use model::{
     Alert, AlertEvent, AlertKind, AlertSignal, PortScanAlert, PortScanAlertEvent, PortScanSignal,
     SynFloodAlert, SynFloodAlertEvent, SynFloodSignal,
 };
-pub use port_scan_manager::PortScanAlertManager;
-pub use proto_manager::{AlertManager, AlertRule};
+pub use port_scan_manager::PortScanAlertLifecycleManager;
+pub use proto_manager::{AlertLifecycleManager, AlertRule};
 pub use state::AlertLifecycle;
-pub use synflood_manager::SynFloodAlertManager;
+pub use synflood_manager::SynFloodAlertLifecycleManager;
 pub use view::{AlertMetricsSnapshot, IpAlertSlotSnapshot};

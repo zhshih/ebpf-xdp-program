@@ -1,7 +1,7 @@
 use std::{collections::HashSet, time::Instant};
 
 use crate::{
-    alert::{PortScanAlert, PortScanAlertEvent, PortScanAlertManager},
+    alert::{PortScanAlert, PortScanAlertEvent, PortScanAlertLifecycleManager},
     anomaly::PortScanDetector,
     metrics::MetricsHandle,
     pipeline::{TickAlerts, view::PortScanSnapshot},
@@ -15,17 +15,20 @@ use crate::{
 /// with data produces a real result, including the first.
 pub struct PortScanRunner {
     detector: PortScanDetector,
-    alert_manager: PortScanAlertManager,
+    alert_lifecycle_manager: PortScanAlertLifecycleManager,
     /// Top scanners from the most recently processed tick; empty until the
     /// first successful tick. Read by [`Self::snapshot`] for the API.
     last_top_n: Vec<PortScanIpBreadth>,
 }
 
 impl PortScanRunner {
-    pub fn new(detector: PortScanDetector, alert_manager: PortScanAlertManager) -> Self {
+    pub fn new(
+        detector: PortScanDetector,
+        alert_lifecycle_manager: PortScanAlertLifecycleManager,
+    ) -> Self {
         Self {
             detector,
-            alert_manager,
+            alert_lifecycle_manager,
             last_top_n: Vec::new(),
         }
     }
@@ -45,7 +48,9 @@ impl PortScanRunner {
         let top_n =
             compute_port_scan_breadth(curr, self.detector.window_ns(), self.detector.top_n());
         let signals = self.detector.detect(&top_n);
-        let transitions = self.alert_manager.evaluate(&signals, Instant::now());
+        let transitions = self
+            .alert_lifecycle_manager
+            .evaluate(&signals, Instant::now());
 
         for event in &transitions {
             tracing::warn!(
@@ -57,13 +62,15 @@ impl PortScanRunner {
             );
         }
 
-        metrics.update_port_scan(&top_n, self.alert_manager.active_count());
+        metrics.update_port_scan(&top_n, self.alert_lifecycle_manager.active_count());
         for event in &transitions {
             metrics.record_port_scan_event(event.lifecycle);
         }
 
         let just_transitioned: HashSet<_> = transitions.iter().map(|e| e.alert.src_ip).collect();
-        let heartbeats = self.alert_manager.heartbeats(&signals, &just_transitioned);
+        let heartbeats = self
+            .alert_lifecycle_manager
+            .heartbeats(&signals, &just_transitioned);
 
         self.last_top_n = top_n;
 
@@ -78,7 +85,7 @@ impl PortScanRunner {
     pub fn snapshot(&self) -> PortScanSnapshot {
         PortScanSnapshot {
             top_scanners: self.last_top_n.clone(),
-            alerts: self.alert_manager.snapshot(),
+            alerts: self.alert_lifecycle_manager.snapshot(),
         }
     }
 }
@@ -104,7 +111,7 @@ mod tests {
     fn make_runner(max_distinct_ports: u32, top_n: usize) -> PortScanRunner {
         PortScanRunner::new(
             PortScanDetector::new(max_distinct_ports, top_n, 30_000_000_000),
-            PortScanAlertManager::new(Duration::ZERO, 1, 1),
+            PortScanAlertLifecycleManager::new(Duration::ZERO, 1, 1),
         )
     }
 

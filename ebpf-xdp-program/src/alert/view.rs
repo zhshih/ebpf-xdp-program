@@ -4,14 +4,14 @@
 //!
 //! Both types here are the return value of a *secondary* introspection
 //! method, not a manager's primary one: [`AlertMetricsSnapshot`] comes from
-//! `AlertManager::snapshot()` (not `evaluate()`) and is a direct
+//! `AlertLifecycleManager::snapshot()` (not `evaluate()`) and is a direct
 //! read of `AlertState`'s own private fields (`phase_value()`,
 //! `phase_label()`, `consecutive_count`) — it exists for no reason other
 //! than to expose them. [`IpAlertSlotSnapshot`] comes from
-//! `SynFloodAlertManager::snapshot()`/`PortScanAlertManager::snapshot()`
+//! `SynFloodAlertLifecycleManager::snapshot()`/`PortScanAlertLifecycleManager::snapshot()`
 //! (neither from `evaluate()`), for the same reason — shared by both since
 //! that method is now one generic implementation
-//! (`ip_manager::IpAlertManager::snapshot`) for both managers. Mirrors
+//! (`ip_manager::IpAlertLifecycleManager::snapshot`) for both managers. Mirrors
 //! `anomaly::view`'s `AnomalyView`.
 use std::net::Ipv4Addr;
 

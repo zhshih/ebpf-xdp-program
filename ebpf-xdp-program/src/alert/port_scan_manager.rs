@@ -3,11 +3,11 @@
 //! `crate::alert`'s module doc for why this file still exists separately
 //! from `synflood_manager.rs`.
 use crate::alert::{
-    ip_manager::IpAlertManager,
+    ip_manager::IpAlertLifecycleManager,
     model::{PortScanAlert, PortScanSignal},
 };
 
-pub type PortScanAlertManager = IpAlertManager<PortScanSignal, PortScanAlert>;
+pub type PortScanAlertLifecycleManager = IpAlertLifecycleManager<PortScanSignal, PortScanAlert>;
 
 #[cfg(test)]
 mod tests {
@@ -32,7 +32,7 @@ mod tests {
 
     #[test]
     fn port_scan_manager_fires_after_consecutive() {
-        let mut mgr = PortScanAlertManager::new(NO_COOLDOWN, 3, 1);
+        let mut mgr = PortScanAlertLifecycleManager::new(NO_COOLDOWN, 3, 1);
         let now = Instant::now();
 
         let e1 = mgr.evaluate(&[signal(1, 30)], now);
@@ -48,7 +48,7 @@ mod tests {
 
     #[test]
     fn port_scan_manager_resolves_after_quiet() {
-        let mut mgr = PortScanAlertManager::new(NO_COOLDOWN, 1, 1);
+        let mut mgr = PortScanAlertLifecycleManager::new(NO_COOLDOWN, 1, 1);
         let now = Instant::now();
 
         let fired = mgr.evaluate(&[signal(1, 30)], now);
@@ -63,7 +63,7 @@ mod tests {
     #[test]
     fn port_scan_manager_cooldown_blocks_refire() {
         let long_cooldown = Duration::from_secs(3600);
-        let mut mgr = PortScanAlertManager::new(long_cooldown, 1, 1);
+        let mut mgr = PortScanAlertLifecycleManager::new(long_cooldown, 1, 1);
         let now = Instant::now();
 
         mgr.evaluate(&[signal(1, 30)], now); // fires
@@ -75,7 +75,7 @@ mod tests {
 
     #[test]
     fn port_scan_manager_gc_drops_inactive_non_signaled_ip() {
-        let mut mgr = PortScanAlertManager::new(NO_COOLDOWN, 5, 1);
+        let mut mgr = PortScanAlertLifecycleManager::new(NO_COOLDOWN, 5, 1);
         let now = Instant::now();
 
         mgr.evaluate(&[signal(1, 30)], now); // count=1, Pending
@@ -87,7 +87,7 @@ mod tests {
     #[test]
     fn port_scan_manager_bounded_state_does_not_grow_with_ip_churn() {
         let top_n = 5;
-        let mut mgr = PortScanAlertManager::new(NO_COOLDOWN, 3, 1);
+        let mut mgr = PortScanAlertLifecycleManager::new(NO_COOLDOWN, 3, 1);
         let now = Instant::now();
 
         for tick in 0..100u32 {
@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn heartbeats_empty_before_firing() {
-        let mut mgr = PortScanAlertManager::new(NO_COOLDOWN, 3, 1);
+        let mut mgr = PortScanAlertLifecycleManager::new(NO_COOLDOWN, 3, 1);
         let now = Instant::now();
 
         mgr.evaluate(&[signal(1, 30)], now); // Pending, not yet Firing
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn heartbeats_returns_alert_on_subsequent_tick_while_firing() {
-        let mut mgr = PortScanAlertManager::new(NO_COOLDOWN, 1, 1);
+        let mut mgr = PortScanAlertLifecycleManager::new(NO_COOLDOWN, 1, 1);
         let now = Instant::now();
 
         let fired = mgr.evaluate(&[signal(1, 30)], now);
@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn heartbeats_excludes_ip_that_just_transitioned() {
-        let mut mgr = PortScanAlertManager::new(NO_COOLDOWN, 1, 1);
+        let mut mgr = PortScanAlertLifecycleManager::new(NO_COOLDOWN, 1, 1);
         let now = Instant::now();
 
         let fired = mgr.evaluate(&[signal(1, 30)], now);
@@ -149,7 +149,7 @@ mod tests {
 
     #[test]
     fn heartbeats_empty_once_signal_drops() {
-        let mut mgr = PortScanAlertManager::new(NO_COOLDOWN, 1, 2);
+        let mut mgr = PortScanAlertLifecycleManager::new(NO_COOLDOWN, 1, 2);
         let now = Instant::now();
 
         mgr.evaluate(&[signal(1, 30)], now); // fires

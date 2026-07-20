@@ -1,7 +1,7 @@
 use std::{collections::HashSet, time::Instant};
 
 use crate::{
-    alert::{SynFloodAlert, SynFloodAlertEvent, SynFloodAlertManager},
+    alert::{SynFloodAlert, SynFloodAlertEvent, SynFloodAlertLifecycleManager},
     anomaly::SynFloodDetector,
     metrics::MetricsHandle,
     pipeline::{TickAlerts, view::SynFloodSnapshot},
@@ -15,18 +15,21 @@ use crate::{
 pub struct SynFloodRunner {
     prev_snapshot: Option<SynCountersSnapshot>,
     detector: SynFloodDetector,
-    alert_manager: SynFloodAlertManager,
+    alert_lifecycle_manager: SynFloodAlertLifecycleManager,
     /// Top offenders from the most recently processed tick; empty until the
     /// second successful tick. Read by [`Self::snapshot`] for the API.
     last_top_n: Vec<SynIpRate>,
 }
 
 impl SynFloodRunner {
-    pub fn new(detector: SynFloodDetector, alert_manager: SynFloodAlertManager) -> Self {
+    pub fn new(
+        detector: SynFloodDetector,
+        alert_lifecycle_manager: SynFloodAlertLifecycleManager,
+    ) -> Self {
         Self {
             prev_snapshot: None,
             detector,
-            alert_manager,
+            alert_lifecycle_manager,
             last_top_n: Vec::new(),
         }
     }
@@ -51,7 +54,9 @@ impl SynFloodRunner {
 
         let top_n = compute_syn_rates_top_n(&prev, curr, self.detector.top_n());
         let signals = self.detector.detect(&top_n);
-        let transitions = self.alert_manager.evaluate(&signals, Instant::now());
+        let transitions = self
+            .alert_lifecycle_manager
+            .evaluate(&signals, Instant::now());
 
         for event in &transitions {
             tracing::warn!(
@@ -63,13 +68,15 @@ impl SynFloodRunner {
             );
         }
 
-        metrics.update_synflood(&top_n, self.alert_manager.active_count());
+        metrics.update_synflood(&top_n, self.alert_lifecycle_manager.active_count());
         for event in &transitions {
             metrics.record_synflood_event(event.lifecycle);
         }
 
         let just_transitioned: HashSet<_> = transitions.iter().map(|e| e.alert.src_ip).collect();
-        let heartbeats = self.alert_manager.heartbeats(&signals, &just_transitioned);
+        let heartbeats = self
+            .alert_lifecycle_manager
+            .heartbeats(&signals, &just_transitioned);
 
         self.last_top_n = top_n;
 
@@ -84,7 +91,7 @@ impl SynFloodRunner {
     pub fn snapshot(&self) -> SynFloodSnapshot {
         SynFloodSnapshot {
             top_offenders: self.last_top_n.clone(),
-            alerts: self.alert_manager.snapshot(),
+            alerts: self.alert_lifecycle_manager.snapshot(),
         }
     }
 }
@@ -119,7 +126,7 @@ mod tests {
     fn make_runner(max_syn_pps: f64, top_n: usize) -> SynFloodRunner {
         SynFloodRunner::new(
             SynFloodDetector::new(max_syn_pps, top_n),
-            SynFloodAlertManager::new(Duration::ZERO, 1, 1),
+            SynFloodAlertLifecycleManager::new(Duration::ZERO, 1, 1),
         )
     }
 

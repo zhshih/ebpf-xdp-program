@@ -3,11 +3,11 @@
 //! `crate::alert`'s module doc for why this file still exists separately
 //! from `port_scan_manager.rs`.
 use crate::alert::{
-    ip_manager::IpAlertManager,
+    ip_manager::IpAlertLifecycleManager,
     model::{SynFloodAlert, SynFloodSignal},
 };
 
-pub type SynFloodAlertManager = IpAlertManager<SynFloodSignal, SynFloodAlert>;
+pub type SynFloodAlertLifecycleManager = IpAlertLifecycleManager<SynFloodSignal, SynFloodAlert>;
 
 #[cfg(test)]
 mod tests {
@@ -32,7 +32,7 @@ mod tests {
 
     #[test]
     fn synflood_manager_fires_after_consecutive() {
-        let mut mgr = SynFloodAlertManager::new(NO_COOLDOWN, 3, 1);
+        let mut mgr = SynFloodAlertLifecycleManager::new(NO_COOLDOWN, 3, 1);
         let now = Instant::now();
 
         let e1 = mgr.evaluate(&[signal(1, 200.0)], now);
@@ -48,7 +48,7 @@ mod tests {
 
     #[test]
     fn synflood_manager_resolves_after_quiet() {
-        let mut mgr = SynFloodAlertManager::new(NO_COOLDOWN, 1, 1);
+        let mut mgr = SynFloodAlertLifecycleManager::new(NO_COOLDOWN, 1, 1);
         let now = Instant::now();
 
         let fired = mgr.evaluate(&[signal(1, 200.0)], now);
@@ -63,7 +63,7 @@ mod tests {
     #[test]
     fn synflood_manager_cooldown_blocks_refire() {
         let long_cooldown = Duration::from_secs(3600);
-        let mut mgr = SynFloodAlertManager::new(long_cooldown, 1, 1);
+        let mut mgr = SynFloodAlertLifecycleManager::new(long_cooldown, 1, 1);
         let now = Instant::now();
 
         mgr.evaluate(&[signal(1, 200.0)], now); // fires
@@ -75,7 +75,7 @@ mod tests {
 
     #[test]
     fn synflood_manager_gc_drops_inactive_non_signaled_ip() {
-        let mut mgr = SynFloodAlertManager::new(NO_COOLDOWN, 5, 1);
+        let mut mgr = SynFloodAlertLifecycleManager::new(NO_COOLDOWN, 5, 1);
         let now = Instant::now();
 
         // One quiet tick for an IP that never signaled at all shouldn't even
@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn synflood_manager_bounded_state_does_not_grow_with_ip_churn() {
         let top_n = 5;
-        let mut mgr = SynFloodAlertManager::new(NO_COOLDOWN, 3, 1);
+        let mut mgr = SynFloodAlertLifecycleManager::new(NO_COOLDOWN, 3, 1);
         let now = Instant::now();
 
         // Feed many distinct one-shot IPs across many ticks, each appearing
@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn heartbeats_empty_before_firing() {
-        let mut mgr = SynFloodAlertManager::new(NO_COOLDOWN, 3, 1);
+        let mut mgr = SynFloodAlertLifecycleManager::new(NO_COOLDOWN, 3, 1);
         let now = Instant::now();
 
         mgr.evaluate(&[signal(1, 200.0)], now); // Pending, not yet Firing
@@ -121,7 +121,7 @@ mod tests {
 
     #[test]
     fn heartbeats_returns_alert_on_subsequent_tick_while_firing() {
-        let mut mgr = SynFloodAlertManager::new(NO_COOLDOWN, 1, 1);
+        let mut mgr = SynFloodAlertLifecycleManager::new(NO_COOLDOWN, 1, 1);
         let now = Instant::now();
 
         let fired = mgr.evaluate(&[signal(1, 200.0)], now);
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn heartbeats_excludes_ip_that_just_transitioned() {
-        let mut mgr = SynFloodAlertManager::new(NO_COOLDOWN, 1, 1);
+        let mut mgr = SynFloodAlertLifecycleManager::new(NO_COOLDOWN, 1, 1);
         let now = Instant::now();
 
         let fired = mgr.evaluate(&[signal(1, 200.0)], now);
@@ -156,7 +156,7 @@ mod tests {
     fn heartbeats_empty_once_signal_drops() {
         // resolve_consecutive_threshold=2, so one quiet tick keeps it Firing
         // with no active signal to source heartbeat data from.
-        let mut mgr = SynFloodAlertManager::new(NO_COOLDOWN, 1, 2);
+        let mut mgr = SynFloodAlertLifecycleManager::new(NO_COOLDOWN, 1, 2);
         let now = Instant::now();
 
         mgr.evaluate(&[signal(1, 200.0)], now); // fires

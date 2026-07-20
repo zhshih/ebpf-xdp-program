@@ -672,7 +672,7 @@ mod tests {
         use std::time::Instant;
 
         use crate::{
-            alert::AlertManager,
+            alert::AlertLifecycleManager,
             baseline::EwmaEstimator,
             config::default_emergency_detector,
             metrics::MetricsHandle,
@@ -719,7 +719,7 @@ mod tests {
         let mut runner = AnomalyRunner::new(
             estimator,
             default_emergency_detector(),
-            AlertManager::new(vec![AlertRule {
+            AlertLifecycleManager::new(vec![AlertRule {
                 kind: AlertKind::Spike,
                 min_level: AnomalyLevel::Suspicious,
                 min_confidence: 0.0,

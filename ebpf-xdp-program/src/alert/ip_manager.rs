@@ -6,8 +6,8 @@
 //! `SynFloodAlert`, `PortScanSignal`/`PortScanAlert`), plugged in via the
 //! [`IpKeyed`]/[`FromIpSignal`] traits below — implemented in
 //! `crate::alert::model` next to those types, so this file stays decoupled
-//! from any specific detector's vocabulary. `SynFloodAlertManager`/
-//! `PortScanAlertManager` are type aliases of `IpAlertManager<...>`, defined
+//! from any specific detector's vocabulary. `SynFloodAlertLifecycleManager`/
+//! `PortScanAlertLifecycleManager` are type aliases of `IpAlertLifecycleManager<...>`, defined
 //! in `synflood_manager.rs`/`port_scan_manager.rs`.
 use std::{
     collections::{HashMap, HashSet},
@@ -18,7 +18,7 @@ use std::{
 
 use crate::alert::{model::IpAlertEvent, state::AlertState, view::IpAlertSlotSnapshot};
 
-/// Implemented by a per-IP signal type so `IpAlertManager` can key its FSM
+/// Implemented by a per-IP signal type so `IpAlertLifecycleManager` can key its FSM
 /// map without needing to know the signal's other (metric) fields.
 pub trait IpKeyed {
     fn src_ip(&self) -> Ipv4Addr;
@@ -39,7 +39,7 @@ pub trait FromIpSignal<S> {
 /// still "hot" (Pending/Firing/within cooldown) — so live state is bounded
 /// by roughly `top_n + (IPs still cooling down)`, both attacker-independent
 /// config knobs.
-pub struct IpAlertManager<S, A> {
+pub struct IpAlertLifecycleManager<S, A> {
     cooldown: Duration,
     consecutive_threshold: u32,
     resolve_consecutive_threshold: u32,
@@ -47,7 +47,7 @@ pub struct IpAlertManager<S, A> {
     _marker: PhantomData<(S, A)>,
 }
 
-impl<S, A> IpAlertManager<S, A>
+impl<S, A> IpAlertLifecycleManager<S, A>
 where
     S: IpKeyed,
     A: FromIpSignal<S>,
@@ -102,7 +102,7 @@ where
     /// Returns a re-affirmation alert for every currently-`Firing` source IP
     /// that has an active signal this tick, excluding any IP already
     /// represented in `just_transitioned` (this tick's `evaluate()` events).
-    /// See [`crate::alert::AlertManager::heartbeats`] for the full rationale
+    /// See [`crate::alert::AlertLifecycleManager::heartbeats`] for the full rationale
     /// (external sinks like Alertmanager need periodic re-sends between
     /// `Fired`/`Resolved` transitions).
     pub fn heartbeats(&self, signals: &[S], just_transitioned: &HashSet<Ipv4Addr>) -> Vec<A> {

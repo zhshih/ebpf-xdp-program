@@ -22,7 +22,7 @@ use ebpf_xdp_program_common::{PortScanKey, PortTouch, ProtoIndex, ProtoStats, Sy
 use tokio::signal;
 
 use crate::{
-    alert::AlertManager,
+    alert::AlertLifecycleManager,
     pipeline::{AnomalyRunner, PortScanRunner, SynFloodRunner},
     rate::{
         TrafficCountersSnapshot, compute_mix, diff_stats, read_port_scan_snapshot, read_snapshot,
@@ -186,15 +186,15 @@ async fn main() -> anyhow::Result<()> {
     let mut anomaly_runner = AnomalyRunner::new(
         detectors.baseline,
         detectors.emergency,
-        AlertManager::new(detectors.alert_rules),
+        AlertLifecycleManager::new(detectors.alert_rules),
     );
     let mut synflood_runner = SynFloodRunner::new(
         detectors.synflood_detector,
-        detectors.synflood_alert_manager,
+        detectors.synflood_alert_lifecycle_manager,
     );
     let mut port_scan_runner = PortScanRunner::new(
         detectors.port_scan_detector,
-        detectors.port_scan_alert_manager,
+        detectors.port_scan_alert_lifecycle_manager,
     );
 
     // Must read out of `resolved_config` before it's moved by value into

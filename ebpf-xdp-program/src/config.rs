@@ -4,7 +4,7 @@ use anyhow::Context as _;
 use ebpf_xdp_program_common::ProtoIndex;
 
 use crate::{
-    alert::{AlertKind, AlertRule, PortScanAlertManager, SynFloodAlertManager},
+    alert::{AlertKind, AlertRule, PortScanAlertLifecycleManager, SynFloodAlertLifecycleManager},
     anomaly::{
         AnomalyLevel, EmergencyDetector, EmergencyThreshold, PortScanDetector, SynFloodDetector,
     },
@@ -287,7 +287,7 @@ fn build_alert_rules(rules: Vec<AlertRuleConfig>) -> anyhow::Result<Vec<AlertRul
 /// (built from a TOML override or a compiled-in default) after the fact —
 /// there's exactly one place where an `AlertRule`'s values exist, and this is
 /// a pure projection of it, so the rendered view can't drift from what's
-/// actually loaded into the `AlertManager`.
+/// actually loaded into the `AlertLifecycleManager`.
 fn resolve_alert_rule(rule: &AlertRule) -> ResolvedAlertRuleConfig {
     ResolvedAlertRuleConfig {
         kind: rule.kind.label(),
@@ -343,7 +343,7 @@ fn build_synflood(
     cfg: Option<SynFloodConfig>,
 ) -> (
     SynFloodDetector,
-    SynFloodAlertManager,
+    SynFloodAlertLifecycleManager,
     ResolvedSynFloodConfig,
 ) {
     let max_syn_pps = cfg.as_ref().and_then(|c| c.max_syn_pps).unwrap_or(100.0);
@@ -358,7 +358,7 @@ fn build_synflood(
         .unwrap_or(3);
 
     let detector = SynFloodDetector::new(max_syn_pps, top_n);
-    let alert_manager = SynFloodAlertManager::new(
+    let alert_lifecycle_manager = SynFloodAlertLifecycleManager::new(
         Duration::from_secs(cooldown_secs),
         consecutive_threshold,
         resolve_consecutive_threshold,
@@ -370,7 +370,7 @@ fn build_synflood(
         consecutive_threshold,
         resolve_consecutive_threshold,
     };
-    (detector, alert_manager, resolved)
+    (detector, alert_lifecycle_manager, resolved)
 }
 
 /// Builds the port-scan detector and alert manager from optional overrides,
@@ -380,7 +380,7 @@ fn build_port_scan(
     cfg: Option<PortScanConfig>,
 ) -> (
     PortScanDetector,
-    PortScanAlertManager,
+    PortScanAlertLifecycleManager,
     ResolvedPortScanConfig,
 ) {
     let max_distinct_ports = cfg
@@ -400,7 +400,7 @@ fn build_port_scan(
 
     let window_ns = Duration::from_secs(window_secs).as_nanos() as u64;
     let detector = PortScanDetector::new(max_distinct_ports, top_n, window_ns);
-    let alert_manager = PortScanAlertManager::new(
+    let alert_lifecycle_manager = PortScanAlertLifecycleManager::new(
         Duration::from_secs(cooldown_secs),
         consecutive_threshold,
         resolve_consecutive_threshold,
@@ -413,7 +413,7 @@ fn build_port_scan(
         consecutive_threshold,
         resolve_consecutive_threshold,
     };
-    (detector, alert_manager, resolved)
+    (detector, alert_lifecycle_manager, resolved)
 }
 
 /// Resolves Alertmanager push settings from optional overrides.
@@ -454,9 +454,9 @@ pub struct ResolvedDetectors {
     pub emergency: EmergencyDetector,
     pub alert_rules: Vec<AlertRule>,
     pub synflood_detector: SynFloodDetector,
-    pub synflood_alert_manager: SynFloodAlertManager,
+    pub synflood_alert_lifecycle_manager: SynFloodAlertLifecycleManager,
     pub port_scan_detector: PortScanDetector,
-    pub port_scan_alert_manager: PortScanAlertManager,
+    pub port_scan_alert_lifecycle_manager: PortScanAlertLifecycleManager,
 }
 
 /// Loads and parses a TOML configuration file, returning domain objects plus
@@ -488,9 +488,9 @@ pub fn load_config(path: &std::path::Path) -> anyhow::Result<(ResolvedDetectors,
     };
     let resolved_alert_rules = rules.iter().map(resolve_alert_rule).collect();
 
-    let (synflood_detector, synflood_alert_manager, resolved_synflood) =
+    let (synflood_detector, synflood_alert_lifecycle_manager, resolved_synflood) =
         build_synflood(cfg.syn_flood);
-    let (port_scan_detector, port_scan_alert_manager, resolved_port_scan) =
+    let (port_scan_detector, port_scan_alert_lifecycle_manager, resolved_port_scan) =
         build_port_scan(cfg.port_scan);
     let resolved_alertmanager = build_alertmanager(cfg.alertmanager)?;
 
@@ -508,9 +508,9 @@ pub fn load_config(path: &std::path::Path) -> anyhow::Result<(ResolvedDetectors,
         emergency,
         alert_rules: rules,
         synflood_detector,
-        synflood_alert_manager,
+        synflood_alert_lifecycle_manager,
         port_scan_detector,
-        port_scan_alert_manager,
+        port_scan_alert_lifecycle_manager,
     };
 
     Ok((detectors, resolved))
@@ -532,9 +532,9 @@ pub fn resolve_all(
                 emergency: default_emergency_detector(),
                 alert_rules: default_alert_rules(),
                 synflood_detector: default_synflood_detector(),
-                synflood_alert_manager: default_synflood_alert_manager(),
+                synflood_alert_lifecycle_manager: default_synflood_alert_lifecycle_manager(),
                 port_scan_detector: default_port_scan_detector(),
-                port_scan_alert_manager: default_port_scan_alert_manager(),
+                port_scan_alert_lifecycle_manager: default_port_scan_alert_lifecycle_manager(),
             },
             default_resolved_config(),
         )),
@@ -584,7 +584,7 @@ pub fn default_synflood_detector() -> SynFloodDetector {
     build_synflood(None).0
 }
 
-pub fn default_synflood_alert_manager() -> SynFloodAlertManager {
+pub fn default_synflood_alert_lifecycle_manager() -> SynFloodAlertLifecycleManager {
     build_synflood(None).1
 }
 
@@ -592,7 +592,7 @@ pub fn default_port_scan_detector() -> PortScanDetector {
     build_port_scan(None).0
 }
 
-pub fn default_port_scan_alert_manager() -> PortScanAlertManager {
+pub fn default_port_scan_alert_lifecycle_manager() -> PortScanAlertLifecycleManager {
     build_port_scan(None).1
 }
 

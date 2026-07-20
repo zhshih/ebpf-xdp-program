@@ -20,7 +20,7 @@ struct AlertKey {
     kind: AlertKind,
 }
 
-/// Configuration for a single alert rule applied by the [`AlertManager`].
+/// Configuration for a single alert rule applied by the [`AlertLifecycleManager`].
 ///
 /// Each rule governs one `AlertKind` and specifies the conditions under which
 /// signals escalate through the FSM and fire alerts.
@@ -41,16 +41,16 @@ pub struct AlertRule {
 }
 
 /// Drives per-`(proto, kind)` alert FSMs for all configured rules.
-pub struct AlertManager {
+pub struct AlertLifecycleManager {
     rules: Vec<AlertRule>,
     states: HashMap<AlertKey, AlertState>,
 }
 
-impl AlertManager {
+impl AlertLifecycleManager {
     /// Creates a manager with the given rules. An empty rule set disables all alerting.
     pub fn new(rules: Vec<AlertRule>) -> Self {
         if rules.is_empty() {
-            tracing::warn!("AlertManager initialized with no rules; alerting disabled");
+            tracing::warn!("AlertLifecycleManager initialized with no rules; alerting disabled");
         }
 
         Self {
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn manager_no_rules_no_events() {
-        let mut mgr = AlertManager::new(vec![]);
+        let mut mgr = AlertLifecycleManager::new(vec![]);
         let events = mgr.evaluate(
             &[spike_signal(ProtoIndex::Tcp, AnomalyLevel::Severe, 1.0)],
             Instant::now(),
@@ -316,7 +316,8 @@ mod tests {
 
     #[test]
     fn manager_signal_below_min_level() {
-        let mut mgr = AlertManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.0, 1)]);
+        let mut mgr =
+            AlertLifecycleManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.0, 1)]);
         // Normal level signal — below Suspicious threshold
         let events = mgr.evaluate(
             &[spike_signal(ProtoIndex::Tcp, AnomalyLevel::Normal, 1.0)],
@@ -327,7 +328,8 @@ mod tests {
 
     #[test]
     fn manager_signal_below_confidence() {
-        let mut mgr = AlertManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.6, 1)]);
+        let mut mgr =
+            AlertLifecycleManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.6, 1)]);
         let events = mgr.evaluate(
             &[spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 0.3)],
             Instant::now(),
@@ -337,7 +339,8 @@ mod tests {
 
     #[test]
     fn manager_fires_after_consecutive() {
-        let mut mgr = AlertManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.0, 3)]);
+        let mut mgr =
+            AlertLifecycleManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.0, 3)]);
         let signal = || spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 1.0);
         let now = Instant::now();
 
@@ -353,7 +356,8 @@ mod tests {
 
     #[test]
     fn manager_resolves_after_quiet() {
-        let mut mgr = AlertManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.0, 1)]);
+        let mut mgr =
+            AlertLifecycleManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.0, 1)]);
         let signal = || spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 1.0);
         let now = Instant::now();
 
@@ -371,7 +375,8 @@ mod tests {
     #[test]
     fn manager_kind_mismatch_signal_ignored() {
         // Rule is Spike-only; a Drop signal should be filtered out entirely.
-        let mut mgr = AlertManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.0, 1)]);
+        let mut mgr =
+            AlertLifecycleManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.0, 1)]);
         let drop_signal = AlertSignal {
             proto: ProtoIndex::Tcp,
             level: AnomalyLevel::Suspicious,
@@ -387,7 +392,7 @@ mod tests {
 
     #[test]
     fn manager_frozen_protos_during_hot() {
-        let mut mgr = AlertManager::new(vec![spike_rule_freezing(1)]);
+        let mut mgr = AlertLifecycleManager::new(vec![spike_rule_freezing(1)]);
         let signal = spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 1.0);
         let now = Instant::now();
 
@@ -402,7 +407,8 @@ mod tests {
 
     #[test]
     fn manager_snapshot_reflects_fired_state() {
-        let mut mgr = AlertManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.0, 1)]);
+        let mut mgr =
+            AlertLifecycleManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.0, 1)]);
         mgr.evaluate(
             &[spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 1.0)],
             Instant::now(),
@@ -419,7 +425,8 @@ mod tests {
 
     #[test]
     fn heartbeats_empty_before_threshold() {
-        let mut mgr = AlertManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.0, 3)]);
+        let mut mgr =
+            AlertLifecycleManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.0, 3)]);
         let signal = spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 1.0);
         let now = Instant::now();
 
@@ -430,7 +437,8 @@ mod tests {
 
     #[test]
     fn heartbeats_returns_alert_on_subsequent_tick_while_firing() {
-        let mut mgr = AlertManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.0, 1)]);
+        let mut mgr =
+            AlertLifecycleManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.0, 1)]);
         let signal = spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 0.9);
         let now = Instant::now();
 
@@ -451,7 +459,8 @@ mod tests {
 
     #[test]
     fn heartbeats_excludes_key_that_just_transitioned() {
-        let mut mgr = AlertManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.0, 1)]);
+        let mut mgr =
+            AlertLifecycleManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.0, 1)]);
         let signal = spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 1.0);
         let now = Instant::now();
 
@@ -482,7 +491,7 @@ mod tests {
             resolve_consecutive_threshold: 2,
             freezes_baseline: false,
         };
-        let mut mgr = AlertManager::new(vec![rule]);
+        let mut mgr = AlertLifecycleManager::new(vec![rule]);
         let signal = spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 1.0);
         let now = Instant::now();
 
