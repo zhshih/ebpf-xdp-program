@@ -8,14 +8,21 @@
 //!
 //! File layout follows the model.rs/view.rs/logic rule documented in
 //! `crate::alert`'s module doc. `pipeline` doesn't originate its own domain
-//! vocabulary — `AnomalyRunner::tick()`/`SynFloodRunner::tick()`/
-//! `PortScanRunner::tick()`, the *primary* methods, return `()` and only
-//! have side effects — it only orchestrates types already defined in
+//! vocabulary — it only orchestrates types already defined in
 //! `alert`/`anomaly`/`rate`, so it has no `model.rs`. It does have one
 //! `view.rs`: [`AlertSlotSnapshot`]/[`ProtoSnapshot`]/[`RunnerSnapshot`]/
 //! [`SynFloodSnapshot`]/[`PortScanSnapshot`] — see `view.rs`'s own doc
 //! comment for why — kept out of `runner.rs`/`synflood_runner.rs`/
 //! `port_scan_runner.rs`, which hold only the managers themselves.
+//!
+//! `AnomalyRunner::tick()`/`SynFloodRunner::tick()`/`PortScanRunner::tick()`,
+//! the *primary* methods, return [`TickAlerts`]: the Fired/Resolved
+//! transitions for this tick (also logged and recorded to metrics, as
+//! before) plus a heartbeat re-affirmation of every still-Firing alert (see
+//! `crate::alert::AlertLifecycleManager::heartbeats`) — consumed by `main.rs` to
+//! dispatch to the Alertmanager sink. `TickAlerts` is a plain return-value
+//! bundle, not new domain vocabulary, so it lives here rather than in a
+//! `model.rs`.
 mod port_scan_runner;
 mod runner;
 mod synflood_runner;
@@ -27,6 +34,20 @@ pub use synflood_runner::SynFloodRunner;
 pub use view::{
     AlertSlotSnapshot, PortScanSnapshot, ProtoSnapshot, RunnerSnapshot, SynFloodSnapshot,
 };
+
+/// Alerts produced by one `tick()` call, for dispatch to external sinks
+/// (e.g. Alertmanager).
+///
+/// `transitions` are Fired/Resolved lifecycle events — emitted once per
+/// phase change, the same values already logged and fed to
+/// `MetricsHandle::record_alert_event`. `heartbeats` are currently-Firing
+/// alerts re-affirmed every tick, since transitions alone leave a gap an
+/// external sink with its own auto-expiry (e.g. Alertmanager's
+/// `resolve_timeout`) would otherwise time out on.
+pub struct TickAlerts<Event, Alert> {
+    pub transitions: Vec<Event>,
+    pub heartbeats: Vec<Alert>,
+}
 
 /// Shared "prime or diff" step at the top of a runner's `tick()`.
 ///

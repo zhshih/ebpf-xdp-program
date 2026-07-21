@@ -1,4 +1,5 @@
 mod alert;
+mod alertmanager;
 mod anomaly;
 mod api;
 mod baseline;
@@ -21,7 +22,7 @@ use ebpf_xdp_program_common::{PortScanKey, PortTouch, ProtoIndex, ProtoStats, Sy
 use tokio::signal;
 
 use crate::{
-    alert::AlertManager,
+    alert::AlertLifecycleManager,
     pipeline::{AnomalyRunner, PortScanRunner, SynFloodRunner},
     rate::{
         TrafficCountersSnapshot, compute_mix, diff_stats, read_port_scan_snapshot, read_snapshot,
@@ -185,16 +186,21 @@ async fn main() -> anyhow::Result<()> {
     let mut anomaly_runner = AnomalyRunner::new(
         detectors.baseline,
         detectors.emergency,
-        AlertManager::new(detectors.alert_rules),
+        AlertLifecycleManager::new(detectors.alert_rules),
     );
     let mut synflood_runner = SynFloodRunner::new(
         detectors.synflood_detector,
-        detectors.synflood_alert_manager,
+        detectors.synflood_alert_lifecycle_manager,
     );
     let mut port_scan_runner = PortScanRunner::new(
         detectors.port_scan_detector,
-        detectors.port_scan_alert_manager,
+        detectors.port_scan_alert_lifecycle_manager,
     );
+
+    // Must read out of `resolved_config` before it's moved by value into
+    // `spawn_api_server` below.
+    let am_sink = alertmanager::maybe_spawn(&resolved_config.alertmanager);
+    let am_generator_url = resolved_config.alertmanager.generator_url.clone();
 
     let api_ctx = spawn_api_server(api_port, resolved_config);
 
@@ -252,7 +258,14 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             _ = anomaly_eval_tick.tick() => {
-                anomaly_runner.tick(&current_counters, &metrics_handle);
+                let alerts = anomaly_runner.tick(&current_counters, &metrics_handle);
+                alertmanager::dispatch_tick_alerts(
+                    am_sink.as_ref(),
+                    am_generator_url.as_deref(),
+                    alerts.transitions.iter().map(|e| (&e.alert, e.lifecycle)),
+                    alerts.heartbeats.iter(),
+                    alertmanager::alert_to_wire,
+                );
                 let mut state = api_ctx.dynamic.write().await;
                 state.warmed_up = anomaly_runner.warmed_up();
                 state.runner_snapshot = Some(anomaly_runner.snapshot(std::time::Instant::now()));
@@ -261,7 +274,14 @@ async fn main() -> anyhow::Result<()> {
                 let Some(curr) = read_or_skip(read_syn_snapshot(&syn_tracker), "SYN_TRACKER snapshot") else {
                     continue;
                 };
-                synflood_runner.tick(&Some(curr), &metrics_handle);
+                let alerts = synflood_runner.tick(&Some(curr), &metrics_handle);
+                alertmanager::dispatch_tick_alerts(
+                    am_sink.as_ref(),
+                    am_generator_url.as_deref(),
+                    alerts.transitions.iter().map(|e| (&e.alert, e.lifecycle)),
+                    alerts.heartbeats.iter(),
+                    alertmanager::synflood_alert_to_wire,
+                );
                 let mut state = api_ctx.dynamic.write().await;
                 state.synflood_snapshot = Some(synflood_runner.snapshot());
             }
@@ -269,7 +289,14 @@ async fn main() -> anyhow::Result<()> {
                 let Some(curr) = read_or_skip(read_port_scan_snapshot(&port_scan_tracker), "PORT_SCAN_TRACKER snapshot") else {
                     continue;
                 };
-                port_scan_runner.tick(&Some(curr), &metrics_handle);
+                let alerts = port_scan_runner.tick(&Some(curr), &metrics_handle);
+                alertmanager::dispatch_tick_alerts(
+                    am_sink.as_ref(),
+                    am_generator_url.as_deref(),
+                    alerts.transitions.iter().map(|e| (&e.alert, e.lifecycle)),
+                    alerts.heartbeats.iter(),
+                    alertmanager::port_scan_alert_to_wire,
+                );
                 let mut state = api_ctx.dynamic.write().await;
                 state.port_scan_snapshot = Some(port_scan_runner.snapshot());
             }

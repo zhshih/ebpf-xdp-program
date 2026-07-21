@@ -1,10 +1,10 @@
-use std::time::Instant;
+use std::{collections::HashSet, time::Instant};
 
 use crate::{
-    alert::PortScanAlertManager,
+    alert::{PortScanAlert, PortScanAlertEvent, PortScanAlertLifecycleManager},
     anomaly::PortScanDetector,
     metrics::MetricsHandle,
-    pipeline::view::PortScanSnapshot,
+    pipeline::{TickAlerts, view::PortScanSnapshot},
     rate::{PortScanCountersSnapshot, PortScanIpBreadth, compute_port_scan_breadth},
 };
 
@@ -15,30 +15,44 @@ use crate::{
 /// with data produces a real result, including the first.
 pub struct PortScanRunner {
     detector: PortScanDetector,
-    alert_manager: PortScanAlertManager,
+    alert_lifecycle_manager: PortScanAlertLifecycleManager,
     /// Top scanners from the most recently processed tick; empty until the
     /// first successful tick. Read by [`Self::snapshot`] for the API.
     last_top_n: Vec<PortScanIpBreadth>,
 }
 
 impl PortScanRunner {
-    pub fn new(detector: PortScanDetector, alert_manager: PortScanAlertManager) -> Self {
+    pub fn new(
+        detector: PortScanDetector,
+        alert_lifecycle_manager: PortScanAlertLifecycleManager,
+    ) -> Self {
         Self {
             detector,
-            alert_manager,
+            alert_lifecycle_manager,
             last_top_n: Vec::new(),
         }
     }
 
-    pub fn tick(&mut self, current: &Option<PortScanCountersSnapshot>, metrics: &MetricsHandle) {
-        let Some(curr) = current else { return };
+    pub fn tick(
+        &mut self,
+        current: &Option<PortScanCountersSnapshot>,
+        metrics: &MetricsHandle,
+    ) -> TickAlerts<PortScanAlertEvent, PortScanAlert> {
+        let Some(curr) = current else {
+            return TickAlerts {
+                transitions: Vec::new(),
+                heartbeats: Vec::new(),
+            };
+        };
 
         let top_n =
             compute_port_scan_breadth(curr, self.detector.window_ns(), self.detector.top_n());
         let signals = self.detector.detect(&top_n);
-        let events = self.alert_manager.evaluate(&signals, Instant::now());
+        let transitions = self
+            .alert_lifecycle_manager
+            .evaluate(&signals, Instant::now());
 
-        for event in &events {
+        for event in &transitions {
             tracing::warn!(
                 src_ip = %event.alert.src_ip,
                 distinct_ports = event.alert.distinct_ports,
@@ -48,12 +62,22 @@ impl PortScanRunner {
             );
         }
 
-        metrics.update_port_scan(&top_n, self.alert_manager.active_count());
-        for event in &events {
+        metrics.update_port_scan(&top_n, self.alert_lifecycle_manager.active_count());
+        for event in &transitions {
             metrics.record_port_scan_event(event.lifecycle);
         }
 
+        let just_transitioned: HashSet<_> = transitions.iter().map(|e| e.alert.src_ip).collect();
+        let heartbeats = self
+            .alert_lifecycle_manager
+            .heartbeats(&signals, &just_transitioned);
+
         self.last_top_n = top_n;
+
+        TickAlerts {
+            transitions,
+            heartbeats,
+        }
     }
 
     /// Assembles a point-in-time view of port-scan state for the `/portscan`
@@ -61,7 +85,7 @@ impl PortScanRunner {
     pub fn snapshot(&self) -> PortScanSnapshot {
         PortScanSnapshot {
             top_scanners: self.last_top_n.clone(),
-            alerts: self.alert_manager.snapshot(),
+            alerts: self.alert_lifecycle_manager.snapshot(),
         }
     }
 }
@@ -87,7 +111,7 @@ mod tests {
     fn make_runner(max_distinct_ports: u32, top_n: usize) -> PortScanRunner {
         PortScanRunner::new(
             PortScanDetector::new(max_distinct_ports, top_n, 30_000_000_000),
-            PortScanAlertManager::new(Duration::ZERO, 1, 1),
+            PortScanAlertLifecycleManager::new(Duration::ZERO, 1, 1),
         )
     }
 
@@ -162,5 +186,41 @@ mod tests {
         assert_eq!(snapshot.alerts[0].phase_label, "firing");
         assert_eq!(snapshot.alerts[0].consecutive_count, 1);
         assert_eq!(snapshot.alerts[0].src_ip, Ipv4Addr::from(1));
+    }
+
+    #[test]
+    fn port_scan_runner_tick_heartbeats_still_firing_alert() {
+        let mut runner = make_runner(2, 10);
+        let s = snap(
+            1_000_000_000,
+            &[
+                (1, 80, 999_000_000),
+                (1, 443, 999_000_000),
+                (1, 22, 999_000_000),
+            ],
+        );
+        let fired = runner.tick(&Some(s), &MetricsHandle);
+        assert_eq!(fired.transitions.len(), 1);
+        assert!(
+            fired.heartbeats.is_empty(),
+            "should not double-send an alert that just fired this tick"
+        );
+
+        // Same offending IP, still over threshold, later timestamp: still Firing.
+        let s2 = snap(
+            2_000_000_000,
+            &[
+                (1, 80, 1_999_000_000),
+                (1, 443, 1_999_000_000),
+                (1, 22, 1_999_000_000),
+            ],
+        );
+        let alerts = runner.tick(&Some(s2), &MetricsHandle);
+        assert!(
+            alerts.transitions.is_empty(),
+            "still firing, no new transition"
+        );
+        assert_eq!(alerts.heartbeats.len(), 1);
+        assert_eq!(alerts.heartbeats[0].src_ip, Ipv4Addr::from(1));
     }
 }

@@ -1,13 +1,16 @@
-use std::time::Instant;
+use std::{collections::HashSet, time::Instant};
 
 use ebpf_xdp_program_common::ProtoIndex;
 
 use crate::{
-    alert::{AlertEvent, AlertManager},
+    alert::{Alert, AlertEvent, AlertLifecycleManager},
     anomaly::{AnomalyDetector, EmergencyDetector, EwmaDetector, compute_anomaly_view},
     baseline::{BaselineState, EwmaEstimator},
     metrics::MetricsHandle,
-    pipeline::view::{AlertSlotSnapshot, ProtoSnapshot, RunnerSnapshot},
+    pipeline::{
+        TickAlerts,
+        view::{AlertSlotSnapshot, ProtoSnapshot, RunnerSnapshot},
+    },
     rate::{ProtoRate, TrafficCountersSnapshot, compute_rates},
 };
 
@@ -15,7 +18,7 @@ pub struct AnomalyRunner {
     prev_counters: Option<TrafficCountersSnapshot>,
     baseline: EwmaEstimator,
     emergency_detector: EmergencyDetector,
-    alert_manager: AlertManager,
+    alert_lifecycle_manager: AlertLifecycleManager,
     warmed_up: bool,
     /// Rates from the most recently processed tick; empty until the second
     /// successful tick. Read by [`Self::snapshot`] for the `/anomalies` API.
@@ -26,27 +29,39 @@ impl AnomalyRunner {
     pub fn new(
         baseline: EwmaEstimator,
         emergency_detector: EmergencyDetector,
-        alert_manager: AlertManager,
+        alert_lifecycle_manager: AlertLifecycleManager,
     ) -> Self {
         Self {
             prev_counters: None,
             baseline,
             emergency_detector,
-            alert_manager,
+            alert_lifecycle_manager,
             warmed_up: false,
             last_rates: Vec::new(),
         }
     }
 
-    pub fn tick(&mut self, current: &Option<TrafficCountersSnapshot>, metrics: &MetricsHandle) {
+    pub fn tick(
+        &mut self,
+        current: &Option<TrafficCountersSnapshot>,
+        metrics: &MetricsHandle,
+    ) -> TickAlerts<AlertEvent, Alert> {
         // Advances the baseline's wall-clock gate unconditionally: this is called once
         // per real ANOMALY_EVAL_INTERVAL tick regardless of data availability, so time
         // must keep advancing even when there's nothing to process yet.
         self.baseline.advance();
 
-        let Some(curr) = current else { return };
+        let Some(curr) = current else {
+            return TickAlerts {
+                transitions: Vec::new(),
+                heartbeats: Vec::new(),
+            };
+        };
         let Some(prev) = super::prime_or_diff(&mut self.prev_counters, current) else {
-            return;
+            return TickAlerts {
+                transitions: Vec::new(),
+                heartbeats: Vec::new(),
+            };
         };
 
         let rates = compute_rates(&prev, curr);
@@ -60,14 +75,14 @@ impl AnomalyRunner {
         }
 
         let ewma_detector = EwmaDetector::new(&self.baseline);
-        let events = run_anomaly_pipeline(
+        let alerts = run_anomaly_pipeline(
             &rates,
             &ewma_detector,
             &self.emergency_detector,
-            &mut self.alert_manager,
+            &mut self.alert_lifecycle_manager,
         );
 
-        let frozen = self.alert_manager.frozen_protos(curr.timestamp);
+        let frozen = self.alert_lifecycle_manager.frozen_protos(curr.timestamp);
         let unfrozen: Vec<_> = rates
             .iter()
             .filter(|r| !frozen.contains(&r.proto))
@@ -78,14 +93,14 @@ impl AnomalyRunner {
             self.baseline.update(&unfrozen);
         }
 
-        if events.is_empty() {
+        if alerts.transitions.is_empty() {
             tracing::info!(
                 baseline_ready = any_ready,
                 "no alert events generated during anomaly evaluation"
             );
         }
 
-        for event in &events {
+        for event in &alerts.transitions {
             tracing::warn!(
                 proto = ?event.alert.proto,
                 level = ?event.alert.level,
@@ -99,12 +114,14 @@ impl AnomalyRunner {
         metrics.update_rates(&rates);
         metrics.update_baseline(&self.baseline);
         metrics.update_anomaly(&rates, &self.baseline);
-        metrics.update_alerts(&self.alert_manager.snapshot(), &frozen);
-        for event in &events {
+        metrics.update_alerts(&self.alert_lifecycle_manager.snapshot(), &frozen);
+        for event in &alerts.transitions {
             metrics.record_alert_event(event.alert.proto, event.alert.kind, event.lifecycle);
         }
 
         self.last_rates = rates;
+
+        alerts
     }
 
     /// Whether the EWMA baseline has produced at least one non-warming tick.
@@ -116,8 +133,8 @@ impl AnomalyRunner {
     /// for the `/anomalies` API endpoint. Pure read — does not mutate any FSM
     /// or baseline, and is safe to call from a different task than `tick()`.
     pub fn snapshot(&self, now: Instant) -> RunnerSnapshot {
-        let frozen = self.alert_manager.frozen_protos(now);
-        let alert_snapshots = self.alert_manager.snapshot();
+        let frozen = self.alert_lifecycle_manager.frozen_protos(now);
+        let alert_snapshots = self.alert_lifecycle_manager.snapshot();
 
         let protos = (0..ProtoIndex::COUNT as usize)
             .filter_map(ProtoIndex::from_index)
@@ -156,8 +173,8 @@ fn run_anomaly_pipeline<E: AnomalyDetector, Em: AnomalyDetector>(
     rates: &[ProtoRate],
     ewma: &E,
     emergency: &Em,
-    alert_manager: &mut AlertManager,
-) -> Vec<AlertEvent> {
+    alert_lifecycle_manager: &mut AlertLifecycleManager,
+) -> TickAlerts<AlertEvent, Alert> {
     let mut all_signals = ewma.detect(rates);
     all_signals.extend(emergency.detect(rates));
 
@@ -165,7 +182,17 @@ fn run_anomaly_pipeline<E: AnomalyDetector, Em: AnomalyDetector>(
         tracing::info!("generated {} total signals", all_signals.len());
     }
 
-    alert_manager.evaluate(&all_signals, Instant::now())
+    let transitions = alert_lifecycle_manager.evaluate(&all_signals, Instant::now());
+    let just_transitioned: HashSet<_> = transitions
+        .iter()
+        .map(|e| (e.alert.proto, e.alert.kind))
+        .collect();
+    let heartbeats = alert_lifecycle_manager.heartbeats(&all_signals, &just_transitioned);
+
+    TickAlerts {
+        transitions,
+        heartbeats,
+    }
 }
 
 #[cfg(test)]
@@ -220,7 +247,7 @@ mod tests {
         AnomalyRunner::new(
             default_baseline_estimator(),
             default_emergency_detector(),
-            AlertManager::new(default_alert_rules()),
+            AlertLifecycleManager::new(default_alert_rules()),
         )
     }
 
@@ -274,7 +301,7 @@ mod tests {
         let mut runner = AnomalyRunner::new(
             estimator,
             default_emergency_detector(),
-            AlertManager::new(default_alert_rules()),
+            AlertLifecycleManager::new(default_alert_rules()),
         );
 
         let mut t = Instant::now();
@@ -331,7 +358,7 @@ mod tests {
         let mut runner = AnomalyRunner::new(
             estimator,
             emergency,
-            AlertManager::new(vec![emergency_rule]),
+            AlertLifecycleManager::new(vec![emergency_rule]),
         );
 
         let t1 = Instant::now();
@@ -382,7 +409,7 @@ mod tests {
         let mut runner = AnomalyRunner::new(
             estimator,
             emergency,
-            AlertManager::new(vec![emergency_rule]),
+            AlertLifecycleManager::new(vec![emergency_rule]),
         );
 
         let t1 = Instant::now();
@@ -461,9 +488,9 @@ mod tests {
     #[test]
     fn pipeline_no_signals_when_ready() {
         let det = SignalDetector(vec![]);
-        let mut mgr = AlertManager::new(vec![immediate_spike_rule()]);
-        let events = run_anomaly_pipeline(&make_rates(), &det, &det, &mut mgr);
-        assert!(events.is_empty());
+        let mut mgr = AlertLifecycleManager::new(vec![immediate_spike_rule()]);
+        let alerts = run_anomaly_pipeline(&make_rates(), &det, &det, &mut mgr);
+        assert!(alerts.transitions.is_empty());
     }
 
     #[test]
@@ -476,14 +503,14 @@ mod tests {
         };
         let det = SignalDetector(vec![signal]);
         let empty = SignalDetector(vec![]);
-        let mut mgr = AlertManager::new(vec![immediate_spike_rule()]);
-        let events = run_anomaly_pipeline(&make_rates(), &det, &empty, &mut mgr);
-        assert!(!events.is_empty());
+        let mut mgr = AlertLifecycleManager::new(vec![immediate_spike_rule()]);
+        let alerts = run_anomaly_pipeline(&make_rates(), &det, &empty, &mut mgr);
+        assert!(!alerts.transitions.is_empty());
     }
 
     /// End-to-end: warm up a real EWMA baseline, then inject a massive traffic spike.
     /// Exercises the full path: `EwmaEstimator` → `EwmaDetector` → Z-score
-    /// computation → `AlertManager` FSM → `AlertEvent::Fired`. No mocked detectors.
+    /// computation → `AlertLifecycleManager` FSM → `AlertEvent::Fired`. No mocked detectors.
     #[test]
     fn end_to_end_spike_fires_after_baseline_warms_up() {
         use crate::{
@@ -514,7 +541,7 @@ mod tests {
 
         let ewma_detector = EwmaDetector::new(&estimator);
         let emergency = EmergencyDetector::new(vec![]);
-        let mut alert_manager = AlertManager::new(vec![AlertRule {
+        let mut alert_lifecycle_manager = AlertLifecycleManager::new(vec![AlertRule {
             kind: AlertKind::Spike,
             min_level: AnomalyLevel::Suspicious,
             min_confidence: 0.0,
@@ -531,11 +558,25 @@ mod tests {
             bps: 10_000_000.0,
         }];
 
-        let events = run_anomaly_pipeline(&spike, &ewma_detector, &emergency, &mut alert_manager);
+        let alerts = run_anomaly_pipeline(
+            &spike,
+            &ewma_detector,
+            &emergency,
+            &mut alert_lifecycle_manager,
+        );
 
-        assert!(!events.is_empty(), "expected at least one alert event");
-        assert!(matches!(events[0].lifecycle, AlertLifecycle::Fired));
-        assert_eq!(events[0].alert.proto, ProtoIndex::Tcp);
-        assert!(matches!(events[0].alert.level, AnomalyLevel::Severe));
+        assert!(
+            !alerts.transitions.is_empty(),
+            "expected at least one alert event"
+        );
+        assert!(matches!(
+            alerts.transitions[0].lifecycle,
+            AlertLifecycle::Fired
+        ));
+        assert_eq!(alerts.transitions[0].alert.proto, ProtoIndex::Tcp);
+        assert!(matches!(
+            alerts.transitions[0].alert.level,
+            AnomalyLevel::Severe
+        ));
     }
 }

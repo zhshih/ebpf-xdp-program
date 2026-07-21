@@ -19,7 +19,7 @@
 //!
 //! - `model.rs` holds [`AnomalyLevel`]: it's a field on `AlertSignal`
 //!   (produced by both [`EwmaDetector`] and [`EmergencyDetector`], consumed
-//!   by [`AlertManager`] in `crate::alert`), and `pipeline`/`api`/`metrics`
+//!   by [`AlertLifecycleManager`] in `crate::alert`), and `pipeline`/`api`/`metrics`
 //!   independently read it as a rendered view — it doesn't belong to just
 //!   one detector, so it doesn't stay colocated with one.
 //! - The [`AnomalyDetector`] trait — the shared contract implemented by both

@@ -4,7 +4,7 @@ use crate::{api::ApiContext, config::ResolvedConfig};
 
 /// Read-only dump of the actually-in-effect configuration. GET-only for now —
 /// hot-reload (POST) would need real design work (validation, atomic swap of
-/// the running `EwmaEstimator`/`AlertManager`, races with in-flight ticks)
+/// the running `EwmaEstimator`/`AlertLifecycleManager`, races with in-flight ticks)
 /// that's out of scope here.
 pub async fn handler(State(ctx): State<ApiContext>) -> Json<ResolvedConfig> {
     Json((*ctx.resolved_config).clone())
@@ -51,5 +51,6 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed["baseline"]["alpha"], expected_alpha);
         assert!(!parsed["alert_rules"].as_array().unwrap().is_empty());
+        assert_eq!(parsed["alertmanager"]["enabled"], false);
     }
 }

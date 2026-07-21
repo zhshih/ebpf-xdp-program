@@ -110,7 +110,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        alert::{AlertKind, AlertManager},
+        alert::{AlertKind, AlertLifecycleManager},
         api::{self, make_ctx},
         config::{default_alert_rules, default_baseline_estimator, default_emergency_detector},
         pipeline::AnomalyRunner,
@@ -144,7 +144,7 @@ mod tests {
         let mut runner = AnomalyRunner::new(
             default_baseline_estimator(),
             default_emergency_detector(),
-            AlertManager::new(default_alert_rules()),
+            AlertLifecycleManager::new(default_alert_rules()),
         );
         let t1 = std::time::Instant::now();
         let t2 = t1 + Duration::from_secs(1);

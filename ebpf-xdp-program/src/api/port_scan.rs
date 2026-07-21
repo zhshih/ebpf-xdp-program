@@ -64,7 +64,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        alert::PortScanAlertSlotSnapshot,
+        alert::IpAlertSlotSnapshot,
         api::{self, make_ctx},
         rate::PortScanIpBreadth,
     };
@@ -103,7 +103,7 @@ mod tests {
                     src_ip: Ipv4Addr::from(1),
                     distinct_ports: 42,
                 }],
-                alerts: vec![PortScanAlertSlotSnapshot {
+                alerts: vec![IpAlertSlotSnapshot {
                     src_ip: Ipv4Addr::from(1),
                     phase_label: "firing",
                     consecutive_count: 3,
@@ -148,7 +148,7 @@ mod tests {
                     distinct_ports: 30,
                 },
             ],
-            alerts: vec![PortScanAlertSlotSnapshot {
+            alerts: vec![IpAlertSlotSnapshot {
                 src_ip: Ipv4Addr::from(2),
                 phase_label: "pending",
                 consecutive_count: 1,

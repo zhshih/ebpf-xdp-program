@@ -2,16 +2,17 @@
 //! the managers that produce them. See `crate::alert`'s module doc for the
 //! full model.rs/view.rs/logic rule this file follows.
 //!
-//! All three types here are the return value of a *secondary* introspection
+//! Both types here are the return value of a *secondary* introspection
 //! method, not a manager's primary one: [`AlertMetricsSnapshot`] comes from
-//! `AlertManager::snapshot()` (not `evaluate()`) and is a direct
+//! `AlertLifecycleManager::snapshot()` (not `evaluate()`) and is a direct
 //! read of `AlertState`'s own private fields (`phase_value()`,
 //! `phase_label()`, `consecutive_count`) — it exists for no reason other
-//! than to expose them. [`SynFloodAlertSlotSnapshot`] comes from
-//! `SynFloodAlertManager::snapshot()`, and [`PortScanAlertSlotSnapshot`]
-//! comes from `PortScanAlertManager::snapshot()` (neither from
-//! `evaluate()`), for the same reason. Mirrors `anomaly::view`'s
-//! `AnomalyView`.
+//! than to expose them. [`IpAlertSlotSnapshot`] comes from
+//! `SynFloodAlertLifecycleManager::snapshot()`/`PortScanAlertLifecycleManager::snapshot()`
+//! (neither from `evaluate()`), for the same reason — shared by both since
+//! that method is now one generic implementation
+//! (`ip_manager::IpAlertLifecycleManager::snapshot`) for both managers. Mirrors
+//! `anomaly::view`'s `AnomalyView`.
 use std::net::Ipv4Addr;
 
 use ebpf_xdp_program_common::ProtoIndex;
@@ -27,15 +28,9 @@ pub struct AlertMetricsSnapshot {
     pub consecutive_count: u32,
 }
 
-/// Point-in-time view of one IP's SYN-flood FSM slot, for the `/synflood` API.
-pub struct SynFloodAlertSlotSnapshot {
-    pub src_ip: Ipv4Addr,
-    pub phase_label: &'static str,
-    pub consecutive_count: u32,
-}
-
-/// Point-in-time view of one IP's port-scan FSM slot, for the `/portscan` API.
-pub struct PortScanAlertSlotSnapshot {
+/// Point-in-time view of one IP's SYN-flood or port-scan FSM slot, for the
+/// `/synflood` and `/portscan` APIs.
+pub struct IpAlertSlotSnapshot {
     pub src_ip: Ipv4Addr,
     pub phase_label: &'static str,
     pub consecutive_count: u32,

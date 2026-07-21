@@ -12,6 +12,10 @@ A Rust eBPF/XDP network traffic anomaly detector. It attaches to a network inter
 - **EWMA-based adaptive baseline** with Huber-clipped robust statistics (ready after ≥5 samples and ≥120s)
 - **Z-score anomaly classification**: Normal (< 3σ), Suspicious (3–6σ), Severe (≥ 6σ)
 - **FSM-based alert engine** with configurable rules, cooldowns, and baseline freezing
+- **SYN-flood detection**: per-source-IP SYN rate against a configurable threshold, tracked in a bounded kernel-side LRU map
+- **Port-scan detection**: per-source-IP distinct destination ports touched within a sliding window
+- **Read-only REST API** for health, resolved config, and live anomaly/offender state
+- **Optional Alertmanager integration**: pushes fired/resolved/heartbeat alerts to a Prometheus Alertmanager instance
 - **Prometheus metrics** exported on a configurable port
 - **TOML configuration** for thresholds, alert rules, and timing
 
@@ -46,21 +50,53 @@ Copy `config.example.toml` to get started with custom thresholds and alert rules
 |------|---------|-------------|
 | `-i, --iface` | `$XDP_IFACE` (required) | Network interface to attach XDP program to (run `ip link` to list yours) |
 | `--metrics-port` | `9091` | Port for Prometheus metrics HTTP endpoint |
+| `--api-port` | `8080` | Port for the read-only JSON API (see [REST API](#rest-api)) |
 | `--config` | _(built-in defaults)_ | Path to TOML configuration file |
 
 ## How It Works
 
+Three independent detection pipelines, each reading its own kernel-side BPF map, feed a shared FSM alert engine (`Inactive → Pending → Firing`):
+
+- **Per-protocol** (`PROTO_STATS`): 1s aggregation → 30s EWMA baseline → Z-score classification
+- **SYN-flood** (`SYN_TRACKER`): every 5s, ranks source IPs by SYN pps against a fixed threshold
+- **Port-scan** (`PORT_SCAN_TRACKER`): every 5s, ranks source IPs by distinct destination ports touched against a fixed threshold
+
 ```
-XDP hook (kernel) → per-CPU BPF map → user-space aggregation (1s)
-  → EWMA baseline (30s)
-  → Z-score classification
-  → FSM alert engine (Inactive → Pending → Firing)
-  → Prometheus metrics / tracing logs
+detection pipeline → FSM alert engine → Prometheus metrics / tracing logs
+                                       → Alertmanager (optional, see below)
 ```
 
-Two alert rules are configured by default:
+Two alert rules govern the per-protocol pipeline by default:
 - **Spike**: Suspicious level (≥ 3σ), 5 consecutive detections required, 120s cooldown, freezes baseline while firing
 - **Emergency**: Severe level (≥ 6σ), fires immediately, 60s cooldown
+
+SYN-flood and port-scan detection each use a single absolute-threshold rule (configurable via `[syn_flood]`/`[port_scan]` in the TOML config — see `config.example.toml`) rather than baseline/Z-score classification, since they track per-source-IP behavior rather than aggregate traffic mix.
+
+## REST API
+
+A read-only JSON API is served on `--api-port` (default `8080`):
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Liveness, plus whether the baseline has warmed up and stats are still fresh |
+| `GET /config` | The fully-resolved configuration (compiled-in defaults + any TOML overrides) |
+| `GET /anomalies` | Per-protocol baseline, rate, and alert FSM state |
+| `GET /synflood` | Current top SYN-flood offender IPs and their alert FSM state |
+| `GET /portscan` | Current top port-scan offender IPs and their alert FSM state |
+
+## Alertmanager Integration
+
+Fired, resolved, and periodic heartbeat alerts (for every still-`Firing` alert, so long-running alerts aren't auto-expired by Alertmanager between transitions) can be pushed to a [Prometheus Alertmanager](https://prometheus.io/docs/alerting/latest/alertmanager/) instance's `POST /api/v2/alerts` endpoint. Disabled by default — enable via a `[alertmanager]` section in your TOML config:
+
+```toml
+[alertmanager]
+enabled = true
+url = "http://localhost:9093/api/v2/alerts"
+timeout_secs = 5              # optional, HTTP request timeout
+generator_url = "http://localhost:8080/anomalies"  # optional, included on every pushed alert
+```
+
+Set Alertmanager's own `resolve_timeout` comfortably longer than this program's heartbeat interval (worst case 30s, the per-protocol anomaly-evaluation cadence) so a long-`Firing` alert isn't auto-resolved by Alertmanager between heartbeats.
 
 ## Sample Output
 

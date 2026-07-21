@@ -4,7 +4,7 @@ use anyhow::Context as _;
 use ebpf_xdp_program_common::ProtoIndex;
 
 use crate::{
-    alert::{AlertKind, AlertRule, PortScanAlertManager, SynFloodAlertManager},
+    alert::{AlertKind, AlertRule, PortScanAlertLifecycleManager, SynFloodAlertLifecycleManager},
     anomaly::{
         AnomalyLevel, EmergencyDetector, EmergencyThreshold, PortScanDetector, SynFloodDetector,
     },
@@ -26,6 +26,7 @@ pub struct Config {
     pub emergency_thresholds: Vec<EmergencyThresholdConfig>,
     pub syn_flood: Option<SynFloodConfig>,
     pub port_scan: Option<PortScanConfig>,
+    pub alertmanager: Option<AlertmanagerConfig>,
 }
 
 /// Overrides for the EWMA baseline estimator parameters.
@@ -103,6 +104,24 @@ pub struct PortScanConfig {
     pub resolve_consecutive_threshold: Option<u32>,
 }
 
+/// Overrides for pushing alerts to a Prometheus Alertmanager instance.
+#[derive(serde::Deserialize)]
+pub struct AlertmanagerConfig {
+    /// Whether to push alerts at all. Defaults to `false` (no accidental
+    /// outbound calls) — set `true` and provide `url` to enable.
+    pub enabled: Option<bool>,
+    /// Alertmanager's alert-push endpoint, e.g.
+    /// `"http://localhost:9093/api/v2/alerts"`. Required when `enabled = true`.
+    pub url: Option<String>,
+    /// HTTP request timeout, in seconds.
+    pub timeout_secs: Option<u64>,
+    /// Optional `generatorURL` to attach to every alert, pointing back at
+    /// this instance's own API (e.g. `/anomalies`). This process cannot
+    /// reliably know its own externally-reachable address, so it's never
+    /// auto-derived — set this only if you know your own deployment topology.
+    pub generator_url: Option<String>,
+}
+
 // ─── Resolved config (actually-in-effect values, for the `/config` API) ──────
 
 /// Resolved EWMA baseline parameters, after defaults have been merged in.
@@ -163,6 +182,20 @@ pub struct ResolvedPortScanConfig {
     pub resolve_consecutive_threshold: u32,
 }
 
+/// Resolved Alertmanager push settings.
+///
+/// Deliberately carries no credential/auth field: this is what `GET /config`
+/// serialises verbatim on an unauthenticated endpoint (see `api/config.rs`).
+/// If a bearer-token/auth field is ever added to [`AlertmanagerConfig`], it
+/// must NOT be mirrored here.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResolvedAlertmanagerConfig {
+    pub enabled: bool,
+    pub url: Option<String>,
+    pub timeout_secs: u64,
+    pub generator_url: Option<String>,
+}
+
 /// The actually-in-effect configuration, resolved from either a TOML file or
 /// compiled-in defaults. Serialised as-is by the `/config` API endpoint.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -172,6 +205,7 @@ pub struct ResolvedConfig {
     pub emergency_thresholds: Vec<ResolvedEmergencyThresholdConfig>,
     pub syn_flood: ResolvedSynFloodConfig,
     pub port_scan: ResolvedPortScanConfig,
+    pub alertmanager: ResolvedAlertmanagerConfig,
 }
 
 // ─── String → domain type parsers ────────────────────────────────────────────
@@ -253,7 +287,7 @@ fn build_alert_rules(rules: Vec<AlertRuleConfig>) -> anyhow::Result<Vec<AlertRul
 /// (built from a TOML override or a compiled-in default) after the fact —
 /// there's exactly one place where an `AlertRule`'s values exist, and this is
 /// a pure projection of it, so the rendered view can't drift from what's
-/// actually loaded into the `AlertManager`.
+/// actually loaded into the `AlertLifecycleManager`.
 fn resolve_alert_rule(rule: &AlertRule) -> ResolvedAlertRuleConfig {
     ResolvedAlertRuleConfig {
         kind: rule.kind.label(),
@@ -309,7 +343,7 @@ fn build_synflood(
     cfg: Option<SynFloodConfig>,
 ) -> (
     SynFloodDetector,
-    SynFloodAlertManager,
+    SynFloodAlertLifecycleManager,
     ResolvedSynFloodConfig,
 ) {
     let max_syn_pps = cfg.as_ref().and_then(|c| c.max_syn_pps).unwrap_or(100.0);
@@ -324,7 +358,7 @@ fn build_synflood(
         .unwrap_or(3);
 
     let detector = SynFloodDetector::new(max_syn_pps, top_n);
-    let alert_manager = SynFloodAlertManager::new(
+    let alert_lifecycle_manager = SynFloodAlertLifecycleManager::new(
         Duration::from_secs(cooldown_secs),
         consecutive_threshold,
         resolve_consecutive_threshold,
@@ -336,7 +370,7 @@ fn build_synflood(
         consecutive_threshold,
         resolve_consecutive_threshold,
     };
-    (detector, alert_manager, resolved)
+    (detector, alert_lifecycle_manager, resolved)
 }
 
 /// Builds the port-scan detector and alert manager from optional overrides,
@@ -346,7 +380,7 @@ fn build_port_scan(
     cfg: Option<PortScanConfig>,
 ) -> (
     PortScanDetector,
-    PortScanAlertManager,
+    PortScanAlertLifecycleManager,
     ResolvedPortScanConfig,
 ) {
     let max_distinct_ports = cfg
@@ -366,7 +400,7 @@ fn build_port_scan(
 
     let window_ns = Duration::from_secs(window_secs).as_nanos() as u64;
     let detector = PortScanDetector::new(max_distinct_ports, top_n, window_ns);
-    let alert_manager = PortScanAlertManager::new(
+    let alert_lifecycle_manager = PortScanAlertLifecycleManager::new(
         Duration::from_secs(cooldown_secs),
         consecutive_threshold,
         resolve_consecutive_threshold,
@@ -379,7 +413,33 @@ fn build_port_scan(
         consecutive_threshold,
         resolve_consecutive_threshold,
     };
-    (detector, alert_manager, resolved)
+    (detector, alert_lifecycle_manager, resolved)
+}
+
+/// Resolves Alertmanager push settings from optional overrides.
+///
+/// Unlike `build_synflood`/`build_port_scan`, this returns no domain object:
+/// the `reqwest::Client`/channel/background task it configures need a tokio
+/// runtime to construct, so `main.rs` builds them directly from the
+/// [`ResolvedAlertmanagerConfig`] returned here (see `crate::alertmanager`).
+/// Errors if `enabled = true` but no `url` is set.
+fn build_alertmanager(
+    cfg: Option<AlertmanagerConfig>,
+) -> anyhow::Result<ResolvedAlertmanagerConfig> {
+    let enabled = cfg.as_ref().and_then(|c| c.enabled).unwrap_or(false);
+    let url = cfg.as_ref().and_then(|c| c.url.clone());
+    if enabled && url.as_deref().is_none_or(str::is_empty) {
+        anyhow::bail!("alertmanager.enabled=true requires alertmanager.url to be set");
+    }
+    let timeout_secs = cfg.as_ref().and_then(|c| c.timeout_secs).unwrap_or(5);
+    let generator_url = cfg.and_then(|c| c.generator_url);
+
+    Ok(ResolvedAlertmanagerConfig {
+        enabled,
+        url,
+        timeout_secs,
+        generator_url,
+    })
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -394,9 +454,9 @@ pub struct ResolvedDetectors {
     pub emergency: EmergencyDetector,
     pub alert_rules: Vec<AlertRule>,
     pub synflood_detector: SynFloodDetector,
-    pub synflood_alert_manager: SynFloodAlertManager,
+    pub synflood_alert_lifecycle_manager: SynFloodAlertLifecycleManager,
     pub port_scan_detector: PortScanDetector,
-    pub port_scan_alert_manager: PortScanAlertManager,
+    pub port_scan_alert_lifecycle_manager: PortScanAlertLifecycleManager,
 }
 
 /// Loads and parses a TOML configuration file, returning domain objects plus
@@ -428,10 +488,11 @@ pub fn load_config(path: &std::path::Path) -> anyhow::Result<(ResolvedDetectors,
     };
     let resolved_alert_rules = rules.iter().map(resolve_alert_rule).collect();
 
-    let (synflood_detector, synflood_alert_manager, resolved_synflood) =
+    let (synflood_detector, synflood_alert_lifecycle_manager, resolved_synflood) =
         build_synflood(cfg.syn_flood);
-    let (port_scan_detector, port_scan_alert_manager, resolved_port_scan) =
+    let (port_scan_detector, port_scan_alert_lifecycle_manager, resolved_port_scan) =
         build_port_scan(cfg.port_scan);
+    let resolved_alertmanager = build_alertmanager(cfg.alertmanager)?;
 
     let resolved = ResolvedConfig {
         baseline: resolved_baseline,
@@ -439,6 +500,7 @@ pub fn load_config(path: &std::path::Path) -> anyhow::Result<(ResolvedDetectors,
         emergency_thresholds: resolved_emergency_thresholds,
         syn_flood: resolved_synflood,
         port_scan: resolved_port_scan,
+        alertmanager: resolved_alertmanager,
     };
 
     let detectors = ResolvedDetectors {
@@ -446,9 +508,9 @@ pub fn load_config(path: &std::path::Path) -> anyhow::Result<(ResolvedDetectors,
         emergency,
         alert_rules: rules,
         synflood_detector,
-        synflood_alert_manager,
+        synflood_alert_lifecycle_manager,
         port_scan_detector,
-        port_scan_alert_manager,
+        port_scan_alert_lifecycle_manager,
     };
 
     Ok((detectors, resolved))
@@ -470,9 +532,9 @@ pub fn resolve_all(
                 emergency: default_emergency_detector(),
                 alert_rules: default_alert_rules(),
                 synflood_detector: default_synflood_detector(),
-                synflood_alert_manager: default_synflood_alert_manager(),
+                synflood_alert_lifecycle_manager: default_synflood_alert_lifecycle_manager(),
                 port_scan_detector: default_port_scan_detector(),
-                port_scan_alert_manager: default_port_scan_alert_manager(),
+                port_scan_alert_lifecycle_manager: default_port_scan_alert_lifecycle_manager(),
             },
             default_resolved_config(),
         )),
@@ -522,7 +584,7 @@ pub fn default_synflood_detector() -> SynFloodDetector {
     build_synflood(None).0
 }
 
-pub fn default_synflood_alert_manager() -> SynFloodAlertManager {
+pub fn default_synflood_alert_lifecycle_manager() -> SynFloodAlertLifecycleManager {
     build_synflood(None).1
 }
 
@@ -530,7 +592,7 @@ pub fn default_port_scan_detector() -> PortScanDetector {
     build_port_scan(None).0
 }
 
-pub fn default_port_scan_alert_manager() -> PortScanAlertManager {
+pub fn default_port_scan_alert_lifecycle_manager() -> PortScanAlertLifecycleManager {
     build_port_scan(None).1
 }
 
@@ -547,6 +609,7 @@ pub fn default_resolved_config() -> ResolvedConfig {
         emergency_thresholds: resolve_emergency_thresholds(&default_emergency_thresholds()),
         syn_flood: build_synflood(None).2,
         port_scan: build_port_scan(None).2,
+        alertmanager: build_alertmanager(None).expect("defaults must be valid"),
     }
 }
 
@@ -788,6 +851,57 @@ mod tests {
         assert_eq!(resolved.consecutive_threshold, 3);
     }
 
+    // ── build_alertmanager ───────────────────────────────────────────────────
+
+    #[test]
+    fn build_alertmanager_none_uses_defaults() {
+        let resolved = build_alertmanager(None).expect("defaults must be valid");
+        assert!(!resolved.enabled);
+        assert_eq!(resolved.url, None);
+        assert_eq!(resolved.timeout_secs, 5);
+        assert_eq!(resolved.generator_url, None);
+    }
+
+    #[test]
+    fn build_alertmanager_applies_overrides() {
+        let resolved = build_alertmanager(Some(AlertmanagerConfig {
+            enabled: Some(true),
+            url: Some("http://localhost:9093/api/v2/alerts".to_string()),
+            timeout_secs: Some(10),
+            generator_url: None,
+        }))
+        .expect("enabled with url is valid");
+        assert!(resolved.enabled);
+        assert_eq!(
+            resolved.url.as_deref(),
+            Some("http://localhost:9093/api/v2/alerts")
+        );
+        assert_eq!(resolved.timeout_secs, 10);
+    }
+
+    #[test]
+    fn build_alertmanager_enabled_without_url_is_err() {
+        let result = build_alertmanager(Some(AlertmanagerConfig {
+            enabled: Some(true),
+            url: None,
+            timeout_secs: None,
+            generator_url: None,
+        }));
+        assert!(result.is_err(), "enabled=true with no url must be rejected");
+    }
+
+    #[test]
+    fn build_alertmanager_disabled_without_url_is_ok() {
+        let resolved = build_alertmanager(Some(AlertmanagerConfig {
+            enabled: Some(false),
+            url: None,
+            timeout_secs: None,
+            generator_url: None,
+        }))
+        .expect("disabled with no url is fine");
+        assert!(!resolved.enabled);
+    }
+
     // ── load_config ──────────────────────────────────────────────────────────
 
     #[test]
@@ -872,6 +986,42 @@ window_secs = 15
         assert_eq!(resolved.port_scan.top_n, 10);
     }
 
+    #[test]
+    fn load_config_with_alertmanager_overrides() {
+        let path = std::env::temp_dir().join("test_config_alertmanager_overrides.toml");
+        std::fs::write(
+            &path,
+            r#"
+[alertmanager]
+enabled = true
+url = "http://localhost:9093/api/v2/alerts"
+"#,
+        )
+        .unwrap();
+        let (_, resolved) = load_config(&path).expect("should parse");
+        assert!(resolved.alertmanager.enabled);
+        assert_eq!(
+            resolved.alertmanager.url.as_deref(),
+            Some("http://localhost:9093/api/v2/alerts")
+        );
+        // Omitted fields still fall back to defaults.
+        assert_eq!(resolved.alertmanager.timeout_secs, 5);
+    }
+
+    #[test]
+    fn load_config_alertmanager_enabled_without_url_returns_err() {
+        let path = std::env::temp_dir().join("test_config_alertmanager_missing_url.toml");
+        std::fs::write(
+            &path,
+            r#"
+[alertmanager]
+enabled = true
+"#,
+        )
+        .unwrap();
+        assert!(load_config(&path).is_err());
+    }
+
     // ── resolved config ──────────────────────────────────────────────────────
 
     #[test]
@@ -899,6 +1049,16 @@ window_secs = 15
         let resolved = default_resolved_config();
         assert_eq!(resolved.port_scan.max_distinct_ports, 20);
         assert_eq!(resolved.port_scan.window_secs, 30);
+    }
+
+    #[test]
+    fn default_resolved_config_includes_alertmanager_defaults() {
+        let resolved = default_resolved_config();
+        assert!(
+            !resolved.alertmanager.enabled,
+            "alertmanager pushing must be off by default"
+        );
+        assert_eq!(resolved.alertmanager.timeout_secs, 5);
     }
 
     #[test]
