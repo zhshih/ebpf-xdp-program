@@ -19,7 +19,8 @@ use log::warn;
 use std::time::Duration;
 
 use ebpf_xdp_program_common::{PortScanKey, PortTouch, ProtoIndex, ProtoStats, SynCounter};
-use tokio::signal;
+use tokio::{signal, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     alert::AlertLifecycleManager,
@@ -43,6 +44,7 @@ const SYNFLOOD_EVAL_INTERVAL: Duration = Duration::from_secs(5);
 // full-map read is comparably costly (in fact larger — 16384 vs 8192
 // max_entries), and 30s is still tuned for EWMA warmup, irrelevant here.
 const PORTSCAN_EVAL_INTERVAL: Duration = Duration::from_secs(5);
+const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -63,23 +65,32 @@ struct Opt {
     config: Option<std::path::PathBuf>,
 }
 
-/// Builds the shared API context and spawns the Axum server as an independent
-/// task (fire-and-forget, like the eBPF-logger task above). Returns the
-/// context so the main loop can write tick-derived state into it.
-fn spawn_api_server(port: u16, resolved_config: config::ResolvedConfig) -> api::ApiContext {
+/// Builds the shared API context and spawns the Axum server as an
+/// independent task. Returns the context so the main loop can write
+/// tick-derived state into it, and the task's `JoinHandle` so an unexpected
+/// exit can be detected.
+fn spawn_api_server(
+    port: u16,
+    resolved_config: config::ResolvedConfig,
+    shutdown: CancellationToken,
+) -> (api::ApiContext, JoinHandle<anyhow::Result<()>>) {
     let ctx = api::ApiContext {
         resolved_config: std::sync::Arc::new(resolved_config),
         dynamic: std::sync::Arc::new(tokio::sync::RwLock::new(api::ApiState::new())),
     };
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     let ctx_for_task = ctx.clone();
-    tokio::task::spawn(async move {
-        if let Err(e) = api::serve(addr, ctx_for_task).await {
-            tracing::error!(error = %e, "API server task exited with error");
-        }
-    });
+    let task = tokio::task::spawn(api::serve(addr, ctx_for_task, shutdown));
     tracing::info!(port, "Axum API listening");
-    ctx
+    (ctx, task)
+}
+
+fn log_api_exit(res: Result<anyhow::Result<()>, tokio::task::JoinError>, when: &str) {
+    match res {
+        Ok(Ok(())) => tracing::info!("API server exited{when}"),
+        Ok(Err(e)) => tracing::error!(error = %e, "API server exited with error{when}"),
+        Err(e) => tracing::error!(error = %e, "API server task panicked{when}"),
+    }
 }
 
 /// Unwraps a BPF map read, logging and returning `None` on error so the
@@ -97,6 +108,8 @@ fn read_or_skip<T>(result: anyhow::Result<T>, what: &str) -> Option<T> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
+
+    let shutdown = CancellationToken::new();
 
     let opt = Opt::parse();
     let metrics_handle = metrics::init(opt.metrics_port)?;
@@ -121,23 +134,30 @@ async fn main() -> anyhow::Result<()> {
         env!("OUT_DIR"),
         "/ebpf-xdp-program"
     )))?;
-    match aya_log::EbpfLogger::init(&mut ebpf) {
+    let logger_task: Option<JoinHandle<()>> = match aya_log::EbpfLogger::init(&mut ebpf) {
         Err(e) => {
             // This can happen if you remove all log statements from your eBPF program.
             warn!("failed to initialize eBPF logger: {e}");
+            None
         }
         Ok(logger) => {
             let mut logger =
                 tokio::io::unix::AsyncFd::with_interest(logger, tokio::io::Interest::READABLE)?;
-            tokio::task::spawn(async move {
+            let shutdown = shutdown.clone();
+            Some(tokio::task::spawn(async move {
                 loop {
-                    let mut guard = logger.readable_mut().await.expect("eBPF logger fd error");
-                    guard.get_inner_mut().flush();
-                    guard.clear_ready();
+                    tokio::select! {
+                        guard = logger.readable_mut() => {
+                            let mut guard = guard.expect("eBPF logger fd error");
+                            guard.get_inner_mut().flush();
+                            guard.clear_ready();
+                        }
+                        _ = shutdown.cancelled() => break,
+                    }
                 }
-            });
+            }))
         }
-    }
+    };
     let Opt {
         iface,
         config: config_path,
@@ -199,10 +219,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Must read out of `resolved_config` before it's moved by value into
     // `spawn_api_server` below.
-    let am_sink = alertmanager::maybe_spawn(&resolved_config.alertmanager);
+    let (am_sink, am_task) = match alertmanager::maybe_spawn(&resolved_config.alertmanager) {
+        Some((sink, task)) => (Some(sink), Some(task)),
+        None => (None, None),
+    };
     let am_generator_url = resolved_config.alertmanager.generator_url.clone();
 
-    let api_ctx = spawn_api_server(api_port, resolved_config);
+    let (api_ctx, mut api_task) = spawn_api_server(api_port, resolved_config, shutdown.clone());
+    let mut api_task_done = false;
 
     loop {
         tokio::select! {
@@ -300,12 +324,55 @@ async fn main() -> anyhow::Result<()> {
                 let mut state = api_ctx.dynamic.write().await;
                 state.port_scan_snapshot = Some(port_scan_runner.snapshot());
             }
+            res = &mut api_task, if !api_task_done => {
+                api_task_done = true;
+                log_api_exit(res, "");
+            }
             _ = signal::ctrl_c() => {
-                tracing::info!("Exiting...");
+                tracing::info!("Shutdown signal received, draining background tasks...");
+                shutdown.cancel();
                 break;
             }
         }
     }
+
+    drop(am_sink);
+
+    // Run concurrently: a hung task can't extend total shutdown wait past
+    // SHUTDOWN_GRACE_PERIOD.
+    let api_drain = async move {
+        if api_task_done {
+            return;
+        }
+        let Ok(res) = tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, api_task).await else {
+            tracing::warn!("API server did not shut down within grace period");
+            return;
+        };
+        log_api_exit(res, " during shutdown");
+    };
+    let logger_drain = async move {
+        let Some(logger_task) = logger_task else {
+            return;
+        };
+        if tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, logger_task)
+            .await
+            .is_err()
+        {
+            tracing::warn!("eBPF logger task did not shut down within grace period");
+        }
+    };
+    let am_drain = async move {
+        let Some(am_task) = am_task else {
+            return;
+        };
+        if tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, am_task)
+            .await
+            .is_err()
+        {
+            tracing::warn!("Alertmanager dispatcher did not shut down within grace period");
+        }
+    };
+    tokio::join!(api_drain, logger_drain, am_drain);
 
     Ok(())
 }

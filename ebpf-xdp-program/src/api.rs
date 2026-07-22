@@ -29,6 +29,7 @@ use std::{net::SocketAddr, sync::Arc, time::Instant};
 use anyhow::Context as _;
 use axum::Router;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::ResolvedConfig,
@@ -85,13 +86,18 @@ pub fn router(ctx: ApiContext) -> Router {
         .with_state(ctx)
 }
 
-/// Binds and serves the router on `addr` until the process exits. Intended to
-/// be driven by a dedicated `tokio::spawn`-ed task.
-pub async fn serve(addr: SocketAddr, ctx: ApiContext) -> anyhow::Result<()> {
+/// Binds and serves the router on `addr` until `shutdown` is cancelled.
+/// Intended to be driven by a dedicated `tokio::spawn`-ed task.
+pub async fn serve(
+    addr: SocketAddr,
+    ctx: ApiContext,
+    shutdown: CancellationToken,
+) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind API listener on {addr}"))?;
     axum::serve(listener, router(ctx))
+        .with_graceful_shutdown(shutdown.cancelled_owned())
         .await
         .context("API server error")
 }
@@ -103,5 +109,35 @@ pub(crate) fn make_ctx() -> ApiContext {
     ApiContext {
         resolved_config: Arc::new(crate::config::default_resolved_config()),
         dynamic: Arc::new(RwLock::new(ApiState::new())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn serve_returns_once_shutdown_is_cancelled() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener); // free the port for `serve` to rebind
+
+        let shutdown = CancellationToken::new();
+        let task = tokio::task::spawn(serve(addr, make_ctx(), shutdown.clone()));
+
+        // Give `serve` a moment to actually bind before cancelling.
+        for _ in 0..100 {
+            if reqwest::get(format!("http://{addr}/health")).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        shutdown.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("serve should return promptly after cancellation")
+            .expect("task should not panic")
+            .expect("serve should return Ok on graceful shutdown");
     }
 }
