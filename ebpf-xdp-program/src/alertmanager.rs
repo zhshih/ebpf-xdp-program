@@ -13,7 +13,10 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use tokio::sync::mpsc::{self, error::TrySendError};
+use tokio::{
+    sync::mpsc::{self, error::TrySendError},
+    task::JoinHandle,
+};
 
 use crate::{
     alert::{Alert, AlertLifecycle, PortScanAlert, SynFloodAlert},
@@ -218,7 +221,10 @@ impl AlertmanagerSink {
 /// Relies on [`crate::config::build_alertmanager`]'s invariant that `url` is
 /// always `Some` when `cfg.enabled` — that's validated at config-load time,
 /// not here.
-pub fn maybe_spawn(cfg: &ResolvedAlertmanagerConfig) -> Option<AlertmanagerSink> {
+///
+/// The `JoinHandle` resolves once every `AlertmanagerSink` clone is dropped
+/// and [`run_dispatcher`] has drained its queue.
+pub fn maybe_spawn(cfg: &ResolvedAlertmanagerConfig) -> Option<(AlertmanagerSink, JoinHandle<()>)> {
     if !cfg.enabled {
         return None;
     }
@@ -242,8 +248,8 @@ pub fn maybe_spawn(cfg: &ResolvedAlertmanagerConfig) -> Option<AlertmanagerSink>
     };
 
     let (tx, rx) = mpsc::channel(DISPATCH_CHANNEL_CAPACITY);
-    tokio::task::spawn(run_dispatcher(rx, client, url));
-    Some(AlertmanagerSink { tx })
+    let task = tokio::task::spawn(run_dispatcher(rx, client, url));
+    Some((AlertmanagerSink { tx }, task))
 }
 
 /// Drains the channel, batching bursts into single POSTs, until the sink
@@ -661,6 +667,24 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        assert_eq!(received.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_task_exits_after_draining_queue_once_sink_dropped() {
+        let (url, received) = spawn_recording_server().await;
+        let client = reqwest::Client::new();
+        let (tx, rx) = mpsc::channel(DISPATCH_CHANNEL_CAPACITY);
+        let task = tokio::spawn(run_dispatcher(rx, client, url));
+        let sink = AlertmanagerSink { tx };
+
+        sink.push(sample_alert());
+        drop(sink);
+
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("dispatcher should exit promptly once all senders are dropped")
+            .expect("dispatcher task should not panic");
         assert_eq!(received.lock().unwrap().len(), 1);
     }
 
