@@ -96,6 +96,12 @@ impl IpKeyed for SynFloodSignal {
     }
 }
 
+impl IpKeyed for SynFloodAlert {
+    fn src_ip(&self) -> Ipv4Addr {
+        self.src_ip
+    }
+}
+
 impl FromIpSignal<SynFloodSignal> for SynFloodAlert {
     fn from_signal(src_ip: Ipv4Addr, signal: Option<&SynFloodSignal>) -> Self {
         SynFloodAlert {
@@ -128,6 +134,12 @@ pub struct PortScanAlert {
 }
 
 impl IpKeyed for PortScanSignal {
+    fn src_ip(&self) -> Ipv4Addr {
+        self.src_ip
+    }
+}
+
+impl IpKeyed for PortScanAlert {
     fn src_ip(&self) -> Ipv4Addr {
         self.src_ip
     }

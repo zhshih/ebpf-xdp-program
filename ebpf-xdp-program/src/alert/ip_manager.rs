@@ -68,7 +68,7 @@ where
 
     /// Filters/advances FSMs against `signals`, then garbage-collects any
     /// entry that's neither in `signals` nor still hot.
-    pub fn evaluate(&mut self, signals: &[S], now: Instant) -> Vec<IpAlertEvent<A>> {
+    fn evaluate(&mut self, signals: &[S], now: Instant) -> Vec<IpAlertEvent<A>> {
         let active: HashMap<Ipv4Addr, &S> = signals.iter().map(|s| (s.src_ip(), s)).collect();
 
         let mut keys: HashSet<Ipv4Addr> = self.states.keys().copied().collect();
@@ -105,7 +105,7 @@ where
     /// See [`crate::alert::AlertLifecycleManager::heartbeats`] for the full rationale
     /// (external sinks like Alertmanager need periodic re-sends between
     /// `Fired`/`Resolved` transitions).
-    pub fn heartbeats(&self, signals: &[S], just_transitioned: &HashSet<Ipv4Addr>) -> Vec<A> {
+    fn heartbeats(&self, signals: &[S], just_transitioned: &HashSet<Ipv4Addr>) -> Vec<A> {
         let active: HashMap<Ipv4Addr, &S> = signals.iter().map(|s| (s.src_ip(), s)).collect();
 
         self.states
@@ -118,6 +118,19 @@ where
                 Some(A::from_signal(*ip, Some(signal)))
             })
             .collect()
+    }
+
+    /// Runs one full tick: `evaluate` then `heartbeats`, threading through
+    /// the `just_transitioned` bookkeeping so callers don't have to.
+    pub fn tick(&mut self, signals: &[S], now: Instant) -> (Vec<IpAlertEvent<A>>, Vec<A>)
+    where
+        A: IpKeyed,
+    {
+        let transitions = self.evaluate(signals, now);
+        let just_transitioned: HashSet<Ipv4Addr> =
+            transitions.iter().map(|e| e.alert.src_ip()).collect();
+        let heartbeats = self.heartbeats(signals, &just_transitioned);
+        (transitions, heartbeats)
     }
 
     pub fn active_count(&self) -> usize {

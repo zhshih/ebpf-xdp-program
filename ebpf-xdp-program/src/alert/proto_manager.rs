@@ -62,7 +62,7 @@ impl AlertLifecycleManager {
     /// Filters `signals` against rule criteria, advances FSMs, and returns lifecycle events.
     ///
     /// Call once per anomaly evaluation tick. Returns an empty vec if no transitions occurred.
-    pub fn evaluate(&mut self, signals: &[AlertSignal], now: Instant) -> Vec<AlertEvent> {
+    fn evaluate(&mut self, signals: &[AlertSignal], now: Instant) -> Vec<AlertEvent> {
         let active = self.collect_active(signals);
         self.advance_states(&active, now)
     }
@@ -82,17 +82,13 @@ impl AlertLifecycleManager {
 
     /// Returns a re-affirmation [`Alert`] for every currently-`Firing`
     /// `(proto, kind)` slot that has an active signal this tick, excluding
-    /// any key already represented in `just_transitioned` (this tick's
-    /// `evaluate()` events).
+    /// any key in `just_transitioned`.
     ///
-    /// `evaluate()` only emits an event on a `Fired`/`Resolved` transition,
-    /// not every tick — external sinks with their own auto-expiry (e.g.
-    /// Alertmanager's `resolve_timeout`) need a periodic re-send of
-    /// still-active alerts between those transitions. Call once per tick,
-    /// after `evaluate()`, passing the `(proto, kind)` pairs of the events
-    /// `evaluate()` just returned so a newly-fired alert isn't re-sent
-    /// twice in the same tick.
-    pub fn heartbeats(
+    /// `evaluate()` only emits on a `Fired`/`Resolved` transition, not every
+    /// tick — external sinks with their own auto-expiry (e.g. Alertmanager's
+    /// `resolve_timeout`) need a periodic re-send of still-active alerts
+    /// between those transitions.
+    fn heartbeats(
         &self,
         signals: &[AlertSignal],
         just_transitioned: &HashSet<(ProtoIndex, AlertKind)>,
@@ -113,6 +109,18 @@ impl AlertLifecycleManager {
                 })
             })
             .collect()
+    }
+
+    /// Runs one full tick: `evaluate` then `heartbeats`, threading through
+    /// the `just_transitioned` bookkeeping so callers don't have to.
+    pub fn tick(&mut self, signals: &[AlertSignal], now: Instant) -> (Vec<AlertEvent>, Vec<Alert>) {
+        let transitions = self.evaluate(signals, now);
+        let just_transitioned: HashSet<(ProtoIndex, AlertKind)> = transitions
+            .iter()
+            .map(|e| (e.alert.proto, e.alert.kind))
+            .collect();
+        let heartbeats = self.heartbeats(signals, &just_transitioned);
+        (transitions, heartbeats)
     }
 
     /// Returns the set of protocols whose baselines should be frozen.
@@ -307,7 +315,7 @@ mod tests {
     #[test]
     fn manager_no_rules_no_events() {
         let mut mgr = AlertLifecycleManager::new(vec![]);
-        let events = mgr.evaluate(
+        let (events, _) = mgr.tick(
             &[spike_signal(ProtoIndex::Tcp, AnomalyLevel::Severe, 1.0)],
             Instant::now(),
         );
@@ -319,7 +327,7 @@ mod tests {
         let mut mgr =
             AlertLifecycleManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.0, 1)]);
         // Normal level signal — below Suspicious threshold
-        let events = mgr.evaluate(
+        let (events, _) = mgr.tick(
             &[spike_signal(ProtoIndex::Tcp, AnomalyLevel::Normal, 1.0)],
             Instant::now(),
         );
@@ -330,7 +338,7 @@ mod tests {
     fn manager_signal_below_confidence() {
         let mut mgr =
             AlertLifecycleManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.6, 1)]);
-        let events = mgr.evaluate(
+        let (events, _) = mgr.tick(
             &[spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 0.3)],
             Instant::now(),
         );
@@ -344,9 +352,9 @@ mod tests {
         let signal = || spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 1.0);
         let now = Instant::now();
 
-        let e1 = mgr.evaluate(&[signal()], now);
-        let e2 = mgr.evaluate(&[signal()], now);
-        let e3 = mgr.evaluate(&[signal()], now);
+        let (e1, _) = mgr.tick(&[signal()], now);
+        let (e2, _) = mgr.tick(&[signal()], now);
+        let (e3, _) = mgr.tick(&[signal()], now);
 
         assert!(e1.is_empty(), "should not fire on tick 1");
         assert!(e2.is_empty(), "should not fire on tick 2");
@@ -362,12 +370,12 @@ mod tests {
         let now = Instant::now();
 
         // Fire
-        let fired = mgr.evaluate(&[signal()], now);
+        let (fired, _) = mgr.tick(&[signal()], now);
         assert_eq!(fired.len(), 1);
         assert!(matches!(fired[0].lifecycle, AlertLifecycle::Fired));
 
         // Quiet tick → resolve (resolve_threshold=1)
-        let resolved = mgr.evaluate(&[], now);
+        let (resolved, _) = mgr.tick(&[], now);
         assert_eq!(resolved.len(), 1);
         assert!(matches!(resolved[0].lifecycle, AlertLifecycle::Resolved));
     }
@@ -383,7 +391,7 @@ mod tests {
             kind: AlertKind::Drop,
             confidence: 1.0,
         };
-        let events = mgr.evaluate(&[drop_signal], Instant::now());
+        let (events, _) = mgr.tick(&[drop_signal], Instant::now());
         assert!(
             events.is_empty(),
             "Drop signal should be ignored by Spike-only rule"
@@ -396,7 +404,7 @@ mod tests {
         let signal = spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 1.0);
         let now = Instant::now();
 
-        mgr.evaluate(&[signal], now);
+        mgr.tick(&[signal], now);
 
         let frozen = mgr.frozen_protos(now);
         assert!(
@@ -409,7 +417,7 @@ mod tests {
     fn manager_snapshot_reflects_fired_state() {
         let mut mgr =
             AlertLifecycleManager::new(vec![spike_rule(AnomalyLevel::Suspicious, 0.0, 1)]);
-        mgr.evaluate(
+        mgr.tick(
             &[spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 1.0)],
             Instant::now(),
         );
@@ -430,8 +438,8 @@ mod tests {
         let signal = spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 1.0);
         let now = Instant::now();
 
-        mgr.evaluate(std::slice::from_ref(&signal), now); // Pending, not yet Firing
-        let heartbeats = mgr.heartbeats(&[signal], &HashSet::new());
+        // Pending, not yet Firing
+        let (_, heartbeats) = mgr.tick(std::slice::from_ref(&signal), now);
         assert!(heartbeats.is_empty(), "should not heartbeat while Pending");
     }
 
@@ -442,14 +450,13 @@ mod tests {
         let signal = spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 0.9);
         let now = Instant::now();
 
-        let fired = mgr.evaluate(std::slice::from_ref(&signal), now);
+        let (fired, _) = mgr.tick(std::slice::from_ref(&signal), now);
         assert_eq!(fired.len(), 1);
 
         // Next tick: still firing, no new transition.
-        let events = mgr.evaluate(std::slice::from_ref(&signal), now);
+        let (events, heartbeats) = mgr.tick(std::slice::from_ref(&signal), now);
         assert!(events.is_empty());
 
-        let heartbeats = mgr.heartbeats(&[signal], &HashSet::new());
         assert_eq!(heartbeats.len(), 1);
         assert_eq!(heartbeats[0].proto, ProtoIndex::Tcp);
         assert_eq!(heartbeats[0].kind, AlertKind::Spike);
@@ -464,14 +471,8 @@ mod tests {
         let signal = spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 1.0);
         let now = Instant::now();
 
-        let fired = mgr.evaluate(std::slice::from_ref(&signal), now);
+        let (fired, heartbeats) = mgr.tick(std::slice::from_ref(&signal), now);
         assert_eq!(fired.len(), 1);
-        let just_transitioned: HashSet<_> = fired
-            .iter()
-            .map(|e| (e.alert.proto, e.alert.kind))
-            .collect();
-
-        let heartbeats = mgr.heartbeats(&[signal], &just_transitioned);
         assert!(
             heartbeats.is_empty(),
             "should not double-send an alert that fired this same tick"
@@ -495,11 +496,9 @@ mod tests {
         let signal = spike_signal(ProtoIndex::Tcp, AnomalyLevel::Suspicious, 1.0);
         let now = Instant::now();
 
-        mgr.evaluate(&[signal], now); // Fired
-        let events = mgr.evaluate(&[], now); // still Firing, resolve threshold not yet met
+        mgr.tick(&[signal], now); // Fired
+        let (events, heartbeats) = mgr.tick(&[], now); // still Firing, resolve threshold not yet met
         assert!(events.is_empty());
-
-        let heartbeats = mgr.heartbeats(&[], &HashSet::new());
         assert!(
             heartbeats.is_empty(),
             "no active signal this tick means no fresh data to heartbeat with"

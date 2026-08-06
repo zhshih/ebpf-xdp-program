@@ -1,4 +1,4 @@
-use std::{collections::HashSet, time::Instant};
+use std::time::Instant;
 
 use crate::{
     alert::{PortScanAlert, PortScanAlertEvent, PortScanAlertLifecycleManager},
@@ -48,9 +48,7 @@ impl PortScanRunner {
         let top_n =
             compute_port_scan_breadth(curr, self.detector.window_ns(), self.detector.top_n());
         let signals = self.detector.detect(&top_n);
-        let transitions = self
-            .alert_lifecycle_manager
-            .evaluate(&signals, Instant::now());
+        let (transitions, heartbeats) = self.alert_lifecycle_manager.tick(&signals, Instant::now());
 
         for event in &transitions {
             tracing::warn!(
@@ -66,11 +64,6 @@ impl PortScanRunner {
         for event in &transitions {
             metrics.record_port_scan_event(event.lifecycle);
         }
-
-        let just_transitioned: HashSet<_> = transitions.iter().map(|e| e.alert.src_ip).collect();
-        let heartbeats = self
-            .alert_lifecycle_manager
-            .heartbeats(&signals, &just_transitioned);
 
         self.last_top_n = top_n;
 
