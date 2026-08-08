@@ -34,7 +34,7 @@ pub trait FromIpSignal<S> {
 /// Drives per-source-IP alert FSMs.
 ///
 /// Bounded memory: an entry is only ever created for an IP present in the
-/// current tick's (already-bounded, top-N) signal list, and `evaluate()`
+/// current tick's (already-bounded, top-N) signal list, and `tick()`
 /// garbage-collects any entry that is neither in this tick's signals nor
 /// still "hot" (Pending/Firing/within cooldown) — so live state is bounded
 /// by roughly `top_n + (IPs still cooling down)`, both attacker-independent
@@ -66,29 +66,45 @@ where
         }
     }
 
-    /// Filters/advances FSMs against `signals`, then garbage-collects any
-    /// entry that's neither in `signals` nor still hot.
-    pub fn evaluate(&mut self, signals: &[S], now: Instant) -> Vec<IpAlertEvent<A>> {
+    /// Advances every FSM against `signals` and returns this tick's alerts.
+    ///
+    /// The first vec is this tick's `Fired`/`Resolved` transitions. The
+    /// second is a re-affirmation alert for every source IP that's still
+    /// `Firing` with an active signal but didn't transition this tick —
+    /// `state.advance()` only emits on a transition, not every tick, and
+    /// external sinks with their own auto-expiry (e.g. Alertmanager's
+    /// `resolve_timeout`) need a periodic re-send of still-active alerts
+    /// between transitions. Afterward, garbage-collects any entry that's
+    /// neither in `signals` nor still hot.
+    pub fn tick(&mut self, signals: &[S], now: Instant) -> (Vec<IpAlertEvent<A>>, Vec<A>) {
         let active: HashMap<Ipv4Addr, &S> = signals.iter().map(|s| (s.src_ip(), s)).collect();
 
         let mut keys: HashSet<Ipv4Addr> = self.states.keys().copied().collect();
         keys.extend(active.keys().copied());
 
         let mut events = Vec::new();
+        let mut heartbeats = Vec::new();
         for ip in keys {
-            let state = self.states.entry(ip).or_insert_with(AlertState::new);
             let signal = active.get(&ip).copied();
-            if let Some(lifecycle) = state.advance(
+            let state = self.states.entry(ip).or_insert_with(AlertState::new);
+
+            match state.advance(
                 signal.is_some(),
                 now,
                 self.cooldown,
                 self.consecutive_threshold,
                 self.resolve_consecutive_threshold,
             ) {
-                events.push(IpAlertEvent {
+                Some(lifecycle) => events.push(IpAlertEvent {
                     alert: A::from_signal(ip, signal),
                     lifecycle,
-                });
+                }),
+                None if state.is_firing() => {
+                    if let Some(s) = signal {
+                        heartbeats.push(A::from_signal(ip, Some(s)));
+                    }
+                }
+                None => {}
             }
         }
 
@@ -96,28 +112,7 @@ where
         self.states
             .retain(|ip, state| active.contains_key(ip) || state.is_hot(now, cooldown));
 
-        events
-    }
-
-    /// Returns a re-affirmation alert for every currently-`Firing` source IP
-    /// that has an active signal this tick, excluding any IP already
-    /// represented in `just_transitioned` (this tick's `evaluate()` events).
-    /// See [`crate::alert::AlertLifecycleManager::heartbeats`] for the full rationale
-    /// (external sinks like Alertmanager need periodic re-sends between
-    /// `Fired`/`Resolved` transitions).
-    pub fn heartbeats(&self, signals: &[S], just_transitioned: &HashSet<Ipv4Addr>) -> Vec<A> {
-        let active: HashMap<Ipv4Addr, &S> = signals.iter().map(|s| (s.src_ip(), s)).collect();
-
-        self.states
-            .iter()
-            .filter_map(|(ip, state)| {
-                if !state.is_firing() || just_transitioned.contains(ip) {
-                    return None;
-                }
-                let signal = active.get(ip).copied()?;
-                Some(A::from_signal(*ip, Some(signal)))
-            })
-            .collect()
+        (events, heartbeats)
     }
 
     pub fn active_count(&self) -> usize {

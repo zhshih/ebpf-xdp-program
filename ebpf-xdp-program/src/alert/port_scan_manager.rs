@@ -12,7 +12,6 @@ pub type PortScanAlertLifecycleManager = IpAlertLifecycleManager<PortScanSignal,
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashSet,
         net::Ipv4Addr,
         time::{Duration, Instant},
     };
@@ -35,9 +34,9 @@ mod tests {
         let mut mgr = PortScanAlertLifecycleManager::new(NO_COOLDOWN, 3, 1);
         let now = Instant::now();
 
-        let e1 = mgr.evaluate(&[signal(1, 30)], now);
-        let e2 = mgr.evaluate(&[signal(1, 30)], now);
-        let e3 = mgr.evaluate(&[signal(1, 30)], now);
+        let (e1, _) = mgr.tick(&[signal(1, 30)], now);
+        let (e2, _) = mgr.tick(&[signal(1, 30)], now);
+        let (e3, _) = mgr.tick(&[signal(1, 30)], now);
 
         assert!(e1.is_empty());
         assert!(e2.is_empty());
@@ -51,11 +50,11 @@ mod tests {
         let mut mgr = PortScanAlertLifecycleManager::new(NO_COOLDOWN, 1, 1);
         let now = Instant::now();
 
-        let fired = mgr.evaluate(&[signal(1, 30)], now);
+        let (fired, _) = mgr.tick(&[signal(1, 30)], now);
         assert_eq!(fired.len(), 1);
         assert!(matches!(fired[0].lifecycle, AlertLifecycle::Fired));
 
-        let resolved = mgr.evaluate(&[], now);
+        let (resolved, _) = mgr.tick(&[], now);
         assert_eq!(resolved.len(), 1);
         assert!(matches!(resolved[0].lifecycle, AlertLifecycle::Resolved));
     }
@@ -66,10 +65,10 @@ mod tests {
         let mut mgr = PortScanAlertLifecycleManager::new(long_cooldown, 1, 1);
         let now = Instant::now();
 
-        mgr.evaluate(&[signal(1, 30)], now); // fires
-        mgr.evaluate(&[], now); // resolves, still within cooldown
+        mgr.tick(&[signal(1, 30)], now); // fires
+        mgr.tick(&[], now); // resolves, still within cooldown
 
-        let refire = mgr.evaluate(&[signal(1, 30)], now);
+        let (refire, _) = mgr.tick(&[signal(1, 30)], now);
         assert!(refire.is_empty(), "cooldown should block refire");
     }
 
@@ -78,9 +77,9 @@ mod tests {
         let mut mgr = PortScanAlertLifecycleManager::new(NO_COOLDOWN, 5, 1);
         let now = Instant::now();
 
-        mgr.evaluate(&[signal(1, 30)], now); // count=1, Pending
+        mgr.tick(&[signal(1, 30)], now); // count=1, Pending
         assert_eq!(mgr.active_count(), 1);
-        mgr.evaluate(&[], now); // signal gone, not hot -> GC'd
+        mgr.tick(&[], now); // signal gone, not hot -> GC'd
         assert_eq!(mgr.active_count(), 0);
     }
 
@@ -94,7 +93,7 @@ mod tests {
             let ips: Vec<PortScanSignal> = (0..top_n)
                 .map(|i| signal(tick * top_n as u32 + i as u32, 30))
                 .collect();
-            mgr.evaluate(&ips, now);
+            mgr.tick(&ips, now);
         }
 
         assert!(
@@ -109,8 +108,8 @@ mod tests {
         let mut mgr = PortScanAlertLifecycleManager::new(NO_COOLDOWN, 3, 1);
         let now = Instant::now();
 
-        mgr.evaluate(&[signal(1, 30)], now); // Pending, not yet Firing
-        let heartbeats = mgr.heartbeats(&[signal(1, 30)], &HashSet::new());
+        // Pending, not yet Firing
+        let (_, heartbeats) = mgr.tick(&[signal(1, 30)], now);
         assert!(heartbeats.is_empty(), "should not heartbeat while Pending");
     }
 
@@ -119,13 +118,12 @@ mod tests {
         let mut mgr = PortScanAlertLifecycleManager::new(NO_COOLDOWN, 1, 1);
         let now = Instant::now();
 
-        let fired = mgr.evaluate(&[signal(1, 30)], now);
+        let (fired, _) = mgr.tick(&[signal(1, 30)], now);
         assert_eq!(fired.len(), 1);
 
-        let events = mgr.evaluate(&[signal(1, 45)], now); // still firing
+        let (events, heartbeats) = mgr.tick(&[signal(1, 45)], now); // still firing
         assert!(events.is_empty());
 
-        let heartbeats = mgr.heartbeats(&[signal(1, 45)], &HashSet::new());
         assert_eq!(heartbeats.len(), 1);
         assert_eq!(heartbeats[0].src_ip, Ipv4Addr::from(1));
         assert_eq!(heartbeats[0].distinct_ports, 45);
@@ -136,11 +134,8 @@ mod tests {
         let mut mgr = PortScanAlertLifecycleManager::new(NO_COOLDOWN, 1, 1);
         let now = Instant::now();
 
-        let fired = mgr.evaluate(&[signal(1, 30)], now);
+        let (fired, heartbeats) = mgr.tick(&[signal(1, 30)], now);
         assert_eq!(fired.len(), 1);
-        let just_transitioned: HashSet<_> = fired.iter().map(|e| e.alert.src_ip).collect();
-
-        let heartbeats = mgr.heartbeats(&[signal(1, 30)], &just_transitioned);
         assert!(
             heartbeats.is_empty(),
             "should not double-send an alert that fired this same tick"
@@ -152,11 +147,9 @@ mod tests {
         let mut mgr = PortScanAlertLifecycleManager::new(NO_COOLDOWN, 1, 2);
         let now = Instant::now();
 
-        mgr.evaluate(&[signal(1, 30)], now); // fires
-        let events = mgr.evaluate(&[], now); // still firing, resolve threshold not yet met
+        mgr.tick(&[signal(1, 30)], now); // fires
+        let (events, heartbeats) = mgr.tick(&[], now); // still firing, resolve threshold not yet met
         assert!(events.is_empty());
-
-        let heartbeats = mgr.heartbeats(&[], &HashSet::new());
         assert!(
             heartbeats.is_empty(),
             "no active signal this tick means no fresh data to heartbeat with"

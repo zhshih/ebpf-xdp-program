@@ -12,7 +12,6 @@ pub type SynFloodAlertLifecycleManager = IpAlertLifecycleManager<SynFloodSignal,
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashSet,
         net::Ipv4Addr,
         time::{Duration, Instant},
     };
@@ -35,9 +34,9 @@ mod tests {
         let mut mgr = SynFloodAlertLifecycleManager::new(NO_COOLDOWN, 3, 1);
         let now = Instant::now();
 
-        let e1 = mgr.evaluate(&[signal(1, 200.0)], now);
-        let e2 = mgr.evaluate(&[signal(1, 200.0)], now);
-        let e3 = mgr.evaluate(&[signal(1, 200.0)], now);
+        let (e1, _) = mgr.tick(&[signal(1, 200.0)], now);
+        let (e2, _) = mgr.tick(&[signal(1, 200.0)], now);
+        let (e3, _) = mgr.tick(&[signal(1, 200.0)], now);
 
         assert!(e1.is_empty());
         assert!(e2.is_empty());
@@ -51,11 +50,11 @@ mod tests {
         let mut mgr = SynFloodAlertLifecycleManager::new(NO_COOLDOWN, 1, 1);
         let now = Instant::now();
 
-        let fired = mgr.evaluate(&[signal(1, 200.0)], now);
+        let (fired, _) = mgr.tick(&[signal(1, 200.0)], now);
         assert_eq!(fired.len(), 1);
         assert!(matches!(fired[0].lifecycle, AlertLifecycle::Fired));
 
-        let resolved = mgr.evaluate(&[], now);
+        let (resolved, _) = mgr.tick(&[], now);
         assert_eq!(resolved.len(), 1);
         assert!(matches!(resolved[0].lifecycle, AlertLifecycle::Resolved));
     }
@@ -66,10 +65,10 @@ mod tests {
         let mut mgr = SynFloodAlertLifecycleManager::new(long_cooldown, 1, 1);
         let now = Instant::now();
 
-        mgr.evaluate(&[signal(1, 200.0)], now); // fires
-        mgr.evaluate(&[], now); // resolves, still within cooldown
+        mgr.tick(&[signal(1, 200.0)], now); // fires
+        mgr.tick(&[], now); // resolves, still within cooldown
 
-        let refire = mgr.evaluate(&[signal(1, 200.0)], now);
+        let (refire, _) = mgr.tick(&[signal(1, 200.0)], now);
         assert!(refire.is_empty(), "cooldown should block refire");
     }
 
@@ -81,9 +80,9 @@ mod tests {
         // One quiet tick for an IP that never signaled at all shouldn't even
         // create a state; a signal that stops before firing should still be
         // dropped by GC once it's no longer hot.
-        mgr.evaluate(&[signal(1, 200.0)], now); // count=1, Pending
+        mgr.tick(&[signal(1, 200.0)], now); // count=1, Pending
         assert_eq!(mgr.active_count(), 1);
-        mgr.evaluate(&[], now); // signal gone, not hot -> GC'd
+        mgr.tick(&[], now); // signal gone, not hot -> GC'd
         assert_eq!(mgr.active_count(), 0);
     }
 
@@ -99,7 +98,7 @@ mod tests {
             let ips: Vec<SynFloodSignal> = (0..top_n)
                 .map(|i| signal(tick * top_n as u32 + i as u32, 200.0))
                 .collect();
-            mgr.evaluate(&ips, now);
+            mgr.tick(&ips, now);
         }
 
         assert!(
@@ -114,8 +113,8 @@ mod tests {
         let mut mgr = SynFloodAlertLifecycleManager::new(NO_COOLDOWN, 3, 1);
         let now = Instant::now();
 
-        mgr.evaluate(&[signal(1, 200.0)], now); // Pending, not yet Firing
-        let heartbeats = mgr.heartbeats(&[signal(1, 200.0)], &HashSet::new());
+        // Pending, not yet Firing
+        let (_, heartbeats) = mgr.tick(&[signal(1, 200.0)], now);
         assert!(heartbeats.is_empty(), "should not heartbeat while Pending");
     }
 
@@ -124,13 +123,12 @@ mod tests {
         let mut mgr = SynFloodAlertLifecycleManager::new(NO_COOLDOWN, 1, 1);
         let now = Instant::now();
 
-        let fired = mgr.evaluate(&[signal(1, 200.0)], now);
+        let (fired, _) = mgr.tick(&[signal(1, 200.0)], now);
         assert_eq!(fired.len(), 1);
 
-        let events = mgr.evaluate(&[signal(1, 250.0)], now); // still firing
+        let (events, heartbeats) = mgr.tick(&[signal(1, 250.0)], now); // still firing
         assert!(events.is_empty());
 
-        let heartbeats = mgr.heartbeats(&[signal(1, 250.0)], &HashSet::new());
         assert_eq!(heartbeats.len(), 1);
         assert_eq!(heartbeats[0].src_ip, Ipv4Addr::from(1));
         assert_eq!(heartbeats[0].pps, 250.0);
@@ -141,11 +139,8 @@ mod tests {
         let mut mgr = SynFloodAlertLifecycleManager::new(NO_COOLDOWN, 1, 1);
         let now = Instant::now();
 
-        let fired = mgr.evaluate(&[signal(1, 200.0)], now);
+        let (fired, heartbeats) = mgr.tick(&[signal(1, 200.0)], now);
         assert_eq!(fired.len(), 1);
-        let just_transitioned: HashSet<_> = fired.iter().map(|e| e.alert.src_ip).collect();
-
-        let heartbeats = mgr.heartbeats(&[signal(1, 200.0)], &just_transitioned);
         assert!(
             heartbeats.is_empty(),
             "should not double-send an alert that fired this same tick"
@@ -159,11 +154,9 @@ mod tests {
         let mut mgr = SynFloodAlertLifecycleManager::new(NO_COOLDOWN, 1, 2);
         let now = Instant::now();
 
-        mgr.evaluate(&[signal(1, 200.0)], now); // fires
-        let events = mgr.evaluate(&[], now); // still firing, resolve threshold not yet met
+        mgr.tick(&[signal(1, 200.0)], now); // fires
+        let (events, heartbeats) = mgr.tick(&[], now); // still firing, resolve threshold not yet met
         assert!(events.is_empty());
-
-        let heartbeats = mgr.heartbeats(&[], &HashSet::new());
         assert!(
             heartbeats.is_empty(),
             "no active signal this tick means no fresh data to heartbeat with"

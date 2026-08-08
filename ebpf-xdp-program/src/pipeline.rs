@@ -19,7 +19,7 @@
 //! the *primary* methods, return [`TickAlerts`]: the Fired/Resolved
 //! transitions for this tick (also logged and recorded to metrics, as
 //! before) plus a heartbeat re-affirmation of every still-Firing alert (see
-//! `crate::alert::AlertLifecycleManager::heartbeats`) — consumed by `main.rs` to
+//! `crate::alert::AlertLifecycleManager::tick`) — consumed by `main.rs` to
 //! dispatch to the Alertmanager sink. `TickAlerts` is a plain return-value
 //! bundle, not new domain vocabulary, so it lives here rather than in a
 //! `model.rs`.

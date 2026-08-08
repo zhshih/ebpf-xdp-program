@@ -1,4 +1,4 @@
-use std::{collections::HashSet, time::Instant};
+use std::time::Instant;
 
 use ebpf_xdp_program_common::ProtoIndex;
 
@@ -182,12 +182,7 @@ fn run_anomaly_pipeline<E: AnomalyDetector, Em: AnomalyDetector>(
         tracing::info!("generated {} total signals", all_signals.len());
     }
 
-    let transitions = alert_lifecycle_manager.evaluate(&all_signals, Instant::now());
-    let just_transitioned: HashSet<_> = transitions
-        .iter()
-        .map(|e| (e.alert.proto, e.alert.kind))
-        .collect();
-    let heartbeats = alert_lifecycle_manager.heartbeats(&all_signals, &just_transitioned);
+    let (transitions, heartbeats) = alert_lifecycle_manager.tick(&all_signals, Instant::now());
 
     TickAlerts {
         transitions,

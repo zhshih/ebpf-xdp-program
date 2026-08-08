@@ -1,4 +1,4 @@
-use std::{collections::HashSet, time::Instant};
+use std::time::Instant;
 
 use crate::{
     alert::{SynFloodAlert, SynFloodAlertEvent, SynFloodAlertLifecycleManager},
@@ -54,9 +54,7 @@ impl SynFloodRunner {
 
         let top_n = compute_syn_rates_top_n(&prev, curr, self.detector.top_n());
         let signals = self.detector.detect(&top_n);
-        let transitions = self
-            .alert_lifecycle_manager
-            .evaluate(&signals, Instant::now());
+        let (transitions, heartbeats) = self.alert_lifecycle_manager.tick(&signals, Instant::now());
 
         for event in &transitions {
             tracing::warn!(
@@ -72,11 +70,6 @@ impl SynFloodRunner {
         for event in &transitions {
             metrics.record_synflood_event(event.lifecycle);
         }
-
-        let just_transitioned: HashSet<_> = transitions.iter().map(|e| e.alert.src_ip).collect();
-        let heartbeats = self
-            .alert_lifecycle_manager
-            .heartbeats(&signals, &just_transitioned);
 
         self.last_top_n = top_n;
 
