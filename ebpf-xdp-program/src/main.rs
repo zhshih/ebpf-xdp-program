@@ -19,7 +19,10 @@ use log::warn;
 use std::time::Duration;
 
 use ebpf_xdp_program_common::{PortScanKey, PortTouch, ProtoIndex, ProtoStats, SynCounter};
-use tokio::{signal, task::JoinHandle};
+use tokio::{
+    signal::unix::{SignalKind, signal},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -90,6 +93,12 @@ fn log_api_exit(res: Result<anyhow::Result<()>, tokio::task::JoinError>, when: &
         Ok(Ok(())) => tracing::info!("API server exited{when}"),
         Ok(Err(e)) => tracing::error!(error = %e, "API server exited with error{when}"),
         Err(e) => tracing::error!(error = %e, "API server task panicked{when}"),
+    }
+}
+
+fn log_task_panic(res: Result<(), tokio::task::JoinError>, task_name: &str) {
+    if let Err(e) = res {
+        tracing::error!(error = %e, "{task_name} task panicked during shutdown");
     }
 }
 
@@ -228,6 +237,10 @@ async fn main() -> anyhow::Result<()> {
     let (api_ctx, mut api_task) = spawn_api_server(api_port, resolved_config, shutdown.clone());
     let mut api_task_done = false;
 
+    let mut sigint = signal(SignalKind::interrupt()).context("failed to install SIGINT handler")?;
+    let mut sigterm =
+        signal(SignalKind::terminate()).context("failed to install SIGTERM handler")?;
+
     loop {
         tokio::select! {
             _ = stats_poll_tick.tick() => {
@@ -328,8 +341,13 @@ async fn main() -> anyhow::Result<()> {
                 api_task_done = true;
                 log_api_exit(res, "");
             }
-            _ = signal::ctrl_c() => {
-                tracing::info!("Shutdown signal received, draining background tasks...");
+            _ = sigint.recv() => {
+                tracing::info!("SIGINT received, draining background tasks...");
+                shutdown.cancel();
+                break;
+            }
+            _ = sigterm.recv() => {
+                tracing::info!("SIGTERM received, draining background tasks...");
                 shutdown.cancel();
                 break;
             }
@@ -354,22 +372,20 @@ async fn main() -> anyhow::Result<()> {
         let Some(logger_task) = logger_task else {
             return;
         };
-        if tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, logger_task)
-            .await
-            .is_err()
-        {
-            tracing::warn!("eBPF logger task did not shut down within grace period");
+        match tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, logger_task).await {
+            Ok(res) => log_task_panic(res, "eBPF logger"),
+            Err(_) => tracing::warn!("eBPF logger task did not shut down within grace period"),
         }
     };
     let am_drain = async move {
         let Some(am_task) = am_task else {
             return;
         };
-        if tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, am_task)
-            .await
-            .is_err()
-        {
-            tracing::warn!("Alertmanager dispatcher did not shut down within grace period");
+        match tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, am_task).await {
+            Ok(res) => log_task_panic(res, "Alertmanager dispatcher"),
+            Err(_) => {
+                tracing::warn!("Alertmanager dispatcher did not shut down within grace period")
+            }
         }
     };
     tokio::join!(api_drain, logger_drain, am_drain);

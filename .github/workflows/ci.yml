@@ -31,7 +31,7 @@ jobs:
           restore-keys: cargo-
 
       - name: Install bpf-linker
-        run: cargo +stable install bpf-linker
+        run: cargo +stable install bpf-linker --version 0.9.15
 
       - name: Check formatting
         run: cargo +nightly fmt --all -- --check

@@ -10,6 +10,7 @@ use aya_ebpf::{
     maps::{LruHashMap, LruPerCpuHashMap, PerCpuArray},
     programs::XdpContext,
 };
+use aya_log_ebpf::warn;
 use ebpf_xdp_program_common::{
     PORT_SCAN_TRACKER_MAX_ENTRIES, PortScanKey, PortTouch, ProtoIndex, ProtoStats,
     SYN_TRACKER_MAX_ENTRIES, SynCounter,
@@ -136,7 +137,7 @@ fn parse_tcp_info(ctx: &XdpContext, ip_hdr_len: usize) -> Option<TcpInfo> {
 }
 
 #[inline(always)]
-fn record_syn(src_addr: u32, bytes: u64) {
+fn record_syn(ctx: &XdpContext, src_addr: u32, bytes: u64) {
     unsafe {
         if let Some(counter) = (*ptr::addr_of_mut!(SYN_TRACKER)).get_ptr_mut(src_addr) {
             (*counter).packets += 1;
@@ -146,18 +147,22 @@ fn record_syn(src_addr: u32, bytes: u64) {
             // Best-effort: even if insert fails, a lost counter update must
             // never propagate into a dropped/aborted packet — this program
             // stays observe-only.
-            let _ = (*ptr::addr_of_mut!(SYN_TRACKER)).insert(src_addr, fresh, 0);
+            if let Err(e) = (*ptr::addr_of_mut!(SYN_TRACKER)).insert(src_addr, fresh, 0) {
+                warn!(ctx, "SYN_TRACKER insert failed: {}", e);
+            }
         }
     }
 }
 
 #[inline(always)]
-fn record_port_touch(key: PortScanKey) {
+fn record_port_touch(ctx: &XdpContext, key: PortScanKey) {
     let touch = PortTouch {
         last_seen_ns: unsafe { bpf_ktime_get_ns() },
     };
     unsafe {
-        let _ = (*ptr::addr_of_mut!(PORT_SCAN_TRACKER)).insert(key, touch, 0);
+        if let Err(e) = (*ptr::addr_of_mut!(PORT_SCAN_TRACKER)).insert(key, touch, 0) {
+            warn!(ctx, "PORT_SCAN_TRACKER insert failed: {}", e);
+        }
     }
 }
 
@@ -189,6 +194,8 @@ fn try_ebpf_xdp_program(ctx: XdpContext) -> Result<u32, u32> {
             if let Some(stat) = (*ptr::addr_of_mut!(PROTO_STATS)).get_ptr_mut(idx) {
                 (*stat).packets += 1;
                 (*stat).bytes += bytes;
+            } else {
+                warn!(&ctx, "PROTO_STATS lookup miss for index {}", idx);
             }
         }
 
@@ -196,8 +203,8 @@ fn try_ebpf_xdp_program(ctx: XdpContext) -> Result<u32, u32> {
             && let Some(tcp) = parse_tcp_info(&ctx, l3.ip_hdr_len)
             && tcp.is_syn
         {
-            record_syn(l3.src_addr, bytes);
-            record_port_touch(PortScanKey::new(l3.src_addr, tcp.dst_port));
+            record_syn(&ctx, l3.src_addr, bytes);
+            record_port_touch(&ctx, PortScanKey::new(l3.src_addr, tcp.dst_port));
         }
     }
 
