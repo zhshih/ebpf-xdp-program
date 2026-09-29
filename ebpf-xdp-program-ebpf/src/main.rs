@@ -72,20 +72,24 @@ const IPPROTO_UDP: u8 = IpProto::Udp as u8;
 /// Result of parsing the Ethernet + IP layers of a frame.
 enum L3Info {
     /// IPv4. `proto` is the raw protocol byte; `ip_hdr_len` is in bytes
-    /// (IHL × 4, already checked to be at least 20); `is_first_fragment` is
-    /// false for any fragment whose payload doesn't start with the L4 header.
+    /// (IHL × 4, already checked to be at least 20); `tot_len` is the IP
+    /// datagram length (already checked to be at least `ip_hdr_len`);
+    /// `is_first_fragment` is false for any fragment whose payload doesn't
+    /// start with the L4 header.
     V4 {
         proto: u8,
         src_addr: u32,
         ip_hdr_len: usize,
+        tot_len: usize,
         is_first_fragment: bool,
     },
     /// IPv6: bounds-checked, nothing extracted. SYN-flood and port-scan
     /// tracking are IPv4-only (`SYN_TRACKER` is keyed by a 32-bit address).
     V6,
-    /// IPv4 EtherType but a version other than 4 or an IHL below 5. Still
-    /// counted (in the Other bucket) so a flood of such frames stays visible
-    /// to rate-based anomaly detection, but never parsed past the IP header.
+    /// IPv4 EtherType but a version other than 4, an IHL below 5, or a total
+    /// length shorter than the header itself. Still counted (in the Other
+    /// bucket) so a flood of such frames stays visible to rate-based anomaly
+    /// detection, but never parsed past the IP header.
     Malformed,
 }
 
@@ -116,7 +120,8 @@ fn parse_ipv4hdr(ctx: &XdpContext) -> Option<L3Info> {
     // address as a `u8` (see IPPROTO_* above). The `&self` accessors
     // (`ihl()`, `version()`) are avoided so no `&Ipv4Hdr` is ever formed
     // over a possibly-invalid `proto` byte.
-    let (vihl, frags, src) = unsafe { ((*ip).vihl, (*ip).frags, (*ip).src_addr) };
+    let (vihl, tot_len, frags, src) =
+        unsafe { ((*ip).vihl, (*ip).tot_len, (*ip).frags, (*ip).src_addr) };
     let proto = unsafe { ptr::addr_of!((*ip).proto).cast::<u8>().read() };
 
     if vihl >> 4 != 4 {
@@ -126,11 +131,16 @@ fn parse_ipv4hdr(ctx: &XdpContext) -> Option<L3Info> {
     if ip_hdr_len < Ipv4Hdr::LEN {
         return Some(L3Info::Malformed);
     }
+    let tot_len = usize::from(u16::from_be_bytes(tot_len));
+    if tot_len < ip_hdr_len {
+        return Some(L3Info::Malformed);
+    }
 
     Some(L3Info::V4 {
         proto,
         src_addr: u32::from_be_bytes(src),
         ip_hdr_len,
+        tot_len,
         is_first_fragment: u16::from_be_bytes(frags) & 0x1FFF == 0,
     })
 }
@@ -234,8 +244,12 @@ fn try_ebpf_xdp_program(ctx: XdpContext) -> Result<u32, u32> {
             proto: IPPROTO_TCP,
             src_addr,
             ip_hdr_len,
+            tot_len,
             is_first_fragment: true,
         } = l3
+            // The TCP header must lie inside the IP datagram, not in frame
+            // padding past `tot_len`, which the sender fully controls.
+            && ip_hdr_len + TcpHdr::LEN <= tot_len
             && let Some(tcp) = parse_tcp_info(&ctx, ip_hdr_len)
             && tcp.is_syn
         {
