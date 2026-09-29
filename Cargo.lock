@@ -431,7 +431,6 @@ dependencies = [
  "log",
  "metrics",
  "metrics-exporter-prometheus",
- "network-types",
  "reqwest",
  "serde",
  "serde_json",

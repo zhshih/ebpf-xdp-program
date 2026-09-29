@@ -59,15 +59,34 @@ fn ptr_at<T>(ctx: &aya_ebpf::programs::XdpContext, offset: usize) -> Option<*con
     Some((start + offset) as *const T)
 }
 
-/// Result of parsing the Ethernet + IP layers of a frame.
+/// IANA protocol numbers this program dispatches on, as raw bytes.
 ///
-/// `src_addr`/`ip_hdr_len` are only meaningful for `IpProto::Ipv6`'s sibling
-/// IPv4 case — the Ipv6 branch below sets them to 0 since SYN-flood tracking
-/// is IPv4-only (the `SYN_TRACKER` map is keyed by a 32-bit address).
-struct L3Info {
-    proto: IpProto,
-    src_addr: u32,
-    ip_hdr_len: usize,
+/// `Ipv4Hdr::proto` is typed `IpProto`, a `#[repr(u8)]` enum with no variant
+/// for protocol numbers 145–252, so reading that field as `IpProto` from an
+/// arbitrary packet would be undefined behaviour. The byte is read as `u8`
+/// instead and compared against these constants.
+const IPPROTO_ICMP: u8 = IpProto::Icmp as u8;
+const IPPROTO_TCP: u8 = IpProto::Tcp as u8;
+const IPPROTO_UDP: u8 = IpProto::Udp as u8;
+
+/// Result of parsing the Ethernet + IP layers of a frame.
+enum L3Info {
+    /// IPv4. `proto` is the raw protocol byte; `ip_hdr_len` is in bytes
+    /// (IHL × 4, already checked to be at least 20); `is_first_fragment` is
+    /// false for any fragment whose payload doesn't start with the L4 header.
+    V4 {
+        proto: u8,
+        src_addr: u32,
+        ip_hdr_len: usize,
+        is_first_fragment: bool,
+    },
+    /// IPv6: bounds-checked, nothing extracted. SYN-flood and port-scan
+    /// tracking are IPv4-only (`SYN_TRACKER` is keyed by a 32-bit address).
+    V6,
+    /// IPv4 EtherType but a version other than 4 or an IHL below 5. Still
+    /// counted (in the Other bucket) so a flood of such frames stays visible
+    /// to rate-based anomaly detection, but never parsed past the IP header.
+    Malformed,
 }
 
 fn parse_l4_protocol(ctx: &XdpContext) -> Option<L3Info> {
@@ -77,11 +96,7 @@ fn parse_l4_protocol(ctx: &XdpContext) -> Option<L3Info> {
     } else if eth == EtherType::Ipv6.into() {
         // Bounds-check the IPv6 header; count the frame in the IPv6 bucket.
         ptr_at::<Ipv6Hdr>(ctx, mem::size_of::<EthHdr>())?;
-        Some(L3Info {
-            proto: IpProto::Ipv6,
-            src_addr: 0,
-            ip_hdr_len: 0,
-        })
+        Some(L3Info::V6)
     } else {
         None
     }
@@ -97,13 +112,26 @@ fn parse_ipv4hdr(ctx: &XdpContext) -> Option<L3Info> {
     let offset = mem::size_of::<EthHdr>();
     let ip = ptr_at::<Ipv4Hdr>(ctx, offset)?;
 
-    let proto = unsafe { (*ip).proto };
-    let src_addr = unsafe { u32::from_be_bytes((*ip).src_addr) };
-    let ip_hdr_len = unsafe { (*ip).ihl() } as usize;
-    Some(L3Info {
+    // Plain-byte fields are read by value. `proto` is read through its
+    // address as a `u8` (see IPPROTO_* above). The `&self` accessors
+    // (`ihl()`, `version()`) are avoided so no `&Ipv4Hdr` is ever formed
+    // over a possibly-invalid `proto` byte.
+    let (vihl, frags, src) = unsafe { ((*ip).vihl, (*ip).frags, (*ip).src_addr) };
+    let proto = unsafe { ptr::addr_of!((*ip).proto).cast::<u8>().read() };
+
+    if vihl >> 4 != 4 {
+        return Some(L3Info::Malformed);
+    }
+    let ip_hdr_len = usize::from(vihl & 0x0F) * 4;
+    if ip_hdr_len < Ipv4Hdr::LEN {
+        return Some(L3Info::Malformed);
+    }
+
+    Some(L3Info::V4 {
         proto,
-        src_addr,
+        src_addr: u32::from_be_bytes(src),
         ip_hdr_len,
+        is_first_fragment: u16::from_be_bytes(frags) & 0x1FFF == 0,
     })
 }
 
@@ -166,13 +194,16 @@ fn record_port_touch(ctx: &XdpContext, key: PortScanKey) {
     }
 }
 
-fn proto_to_index(proto: IpProto) -> u32 {
-    match proto {
-        IpProto::Icmp => ProtoIndex::Icmp as u32,
-        IpProto::Tcp => ProtoIndex::Tcp as u32,
-        IpProto::Udp => ProtoIndex::Udp as u32,
-        IpProto::Ipv6 => ProtoIndex::Ipv6 as u32,
-        _ => ProtoIndex::Other as u32,
+fn proto_to_index(l3: &L3Info) -> u32 {
+    match l3 {
+        L3Info::V6 => ProtoIndex::Ipv6 as u32,
+        L3Info::Malformed => ProtoIndex::Other as u32,
+        L3Info::V4 { proto, .. } => match *proto {
+            IPPROTO_ICMP => ProtoIndex::Icmp as u32,
+            IPPROTO_TCP => ProtoIndex::Tcp as u32,
+            IPPROTO_UDP => ProtoIndex::Udp as u32,
+            _ => ProtoIndex::Other as u32,
+        },
     }
 }
 
@@ -188,7 +219,7 @@ fn try_ebpf_xdp_program(ctx: XdpContext) -> Result<u32, u32> {
     let bytes = packet_len(&ctx);
 
     if let Some(l3) = parse_l4_protocol(&ctx) {
-        let idx = proto_to_index(l3.proto);
+        let idx = proto_to_index(&l3);
 
         unsafe {
             if let Some(stat) = (*ptr::addr_of_mut!(PROTO_STATS)).get_ptr_mut(idx) {
@@ -199,12 +230,17 @@ fn try_ebpf_xdp_program(ctx: XdpContext) -> Result<u32, u32> {
             }
         }
 
-        if l3.proto == IpProto::Tcp
-            && let Some(tcp) = parse_tcp_info(&ctx, l3.ip_hdr_len)
+        if let L3Info::V4 {
+            proto: IPPROTO_TCP,
+            src_addr,
+            ip_hdr_len,
+            is_first_fragment: true,
+        } = l3
+            && let Some(tcp) = parse_tcp_info(&ctx, ip_hdr_len)
             && tcp.is_syn
         {
-            record_syn(&ctx, l3.src_addr, bytes);
-            record_port_touch(&ctx, PortScanKey::new(l3.src_addr, tcp.dst_port));
+            record_syn(&ctx, src_addr, bytes);
+            record_port_touch(&ctx, PortScanKey::new(src_addr, tcp.dst_port));
         }
     }
 
