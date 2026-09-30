@@ -35,7 +35,7 @@ A Rust eBPF/XDP network traffic anomaly detector. It attaches to a network inter
 ```shell
 cargo build --release
 
-# Attach to a network interface (default: wlo1)
+# Attach to a network interface (or set XDP_IFACE once and omit --iface)
 cargo run --release -- --iface eth0
 
 # With custom metrics port and config file
@@ -133,6 +133,13 @@ CC=${ARCH}-linux-musl-gcc cargo build --package ebpf-xdp-program --release \
 ```
 
 The cross-compiled binary can be copied to a Linux server or VM and run there.
+
+## Roadmap
+
+- **Runtime config endpoints**: `PUT /config` and `POST /config/reset`. The REST API is read-only today.
+- **WASM build of `ewma-detector`**: the crate is already `#![no_std]`; what's missing is a `wasm-pack` target and a browser demo built on it.
+- **Cloudflare Workers deployment** (optional), building on the WASM target.
+- **Auto-tuning**: derive `alpha` and the alert thresholds from historical traffic instead of setting them by hand in TOML.
 
 ## License
 
